@@ -1,0 +1,28 @@
+{
+  "name": "payout-guardrail",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/ledger",
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "seed": "npm run seed -w @guardrail/api",
+    "dev:api": "npm run dev -w @guardrail/api",
+    "dev:web": "npm run dev -w @guardrail/web",
+    "build": "npm run build -w @guardrail/web",
+    "test": "vitest run",
+    "typecheck": "tsc -p packages/ledger && tsc -p apps/api && tsc -p apps/web"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "fast-check": "4.10.2",
+    "tsx": "4.23.15",
+    "typescript": "5.8.3",
+    "vitest": "5.0.5"
+  }
+}
