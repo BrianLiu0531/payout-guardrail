@@ -12,30 +12,104 @@ It is the outbound half of an on-chain money system whose inbound half already e
 
 | Phase | Scope | State |
 |---|---|---|
-| 1 | Postgres double-entry ledger, property-based tests, read-only API, ledger UI | **Done** |
-| 2 | Intent API, policy engine (Cedar), passkey approvals, Temporal workflow, KMS signing | planned |
-| 3 | Intent ↔ signature binding, four-way reconciliation, circuit breaker, audit log anchoring, attack demo | planned |
-| 4 | Sanctions screening adapters, agent budgets | optional |
+| 1 | Postgres double-entry ledger, property-based tests, read-only ledger API and UI | **Done** |
+| 2 | Payout intents, Cedar policy, passkey (WebAuthn) approvals, separate signer, durable worker, sign-in | **Done** |
+| 3 | Intent-bound signing, four-way reconciliation, circuit breaker, tamper-evident audit log with signer-held checkpoints, attack lab | **Done** |
+| 4 | KMS/HSM signer backend, sanctions screening, Base Sepolia deployment | next |
 
 ## Running it
 
+Needs Node 22+ and Docker.
+
 ```bash
 npm install
-npm run db:up        # PostgreSQL 16 on localhost:5434
-npm run seed         # demo treasury: vendor and contractor payouts, a reorg reversal, ETH gas
-npm run dev:api      # http://127.0.0.1:8787
-npm run dev:web      # http://localhost:5173 — open this
+docker compose up -d --wait   # PostgreSQL 16 on :5434 and a local EVM chain (anvil) on :8545
+npm run seed                  # ledger history, demo token, users, payees, signer bootstrap
+npm run dev:signer            # signer on 127.0.0.1:8788 (holds the hot wallet key)
+npm run dev:api               # API on 127.0.0.1:8787, with the payout worker and reconciler
+npm run dev:web               # http://localhost:5173 (open this)
 ```
 
-The seed is idempotent: running it again changes nothing.
+Pick a demo user at the top right: **Alice** requests payouts, **Bob** and **Carol** approve. Their passkeys are software keys kept in `.demo-keys.json` (git-ignored), which is what the "Approve as Bob (demo key)" buttons use. To approve with a real passkey (Windows Hello, Touch ID, a security key), click **New approver**, then have Bob and Carol approve your enrollment.
+
+`npm run demo:reset` wipes the database and chain and seeds again, which you need after the two attacks that leave an incident behind.
+
+| Payouts awaiting passkey approval | Four-way reconciliation and the hash-chained audit log |
+|---|---|
+| ![Payouts](docs/payouts.png) | ![Security](docs/security.png) |
+
+## How a payout works
+
+```
+ Alice        API (untrusted)          Bob, Carol           Signer (holds the key)            Chain     Ledger
+   │ request ──► policy check ──────► passkey signs ──────► recompute hash, verify passkeys,
+   │             store intent + hash   SHA-256(intent)      own payee list, own 24h total,
+   │                                                         Cedar policy, breaker ─► sign ──► mined ─► posted
+   │                                                                                            ▲
+   └──────────────── reconciler: intents ⇄ signer log ⇄ on-chain transfers ⇄ ledger balances ──┘
+```
+
+1. **Intent.** A payout is a canonical JSON document: chain, token, recipient, amount, payee, memo, requester. Its SHA-256 (with a domain tag) is the intent hash.
+2. **Policy at request time.** The API evaluates the Cedar policy (`packages/core/policies/payouts.cedar`): per-payout and rolling 24-hour limits, payee must be active and past its cooling-off period, and only requesters may request.
+3. **Approval.** Each approver's passkey signs a WebAuthn challenge that *is* the intent hash, with user verification (PIN or biometric) required. Up to 1,000 USDC needs one approver; above that, two. The requester never counts.
+4. **Signing.** The worker sends the intent and the approvals to the signer. The signer trusts none of what the API says. It:
+   - recomputes the hash from the fields it is about to act on;
+   - verifies every passkey signature against **its own** approver list;
+   - checks the recipient against **its own** payee list and cooling-off period;
+   - computes the 24-hour total from **its own** append-only log;
+   - evaluates the same Cedar policy, including the circuit breaker;
+   - builds the ERC-20 transfer itself and signs it.
+
+   Signing is idempotent per intent, and nonces are allocated under a lock.
+5. **Broadcast and settle.** The worker broadcasts, waits for confirmations, then posts the payout and the gas fee to the double-entry ledger with fixed idempotency keys. Every step can be retried and repeated safely; there is no Temporal server, the state machine lives in Postgres (`FOR UPDATE SKIP LOCKED`).
+6. **Reconciliation** (every 15 s) checks four sources against each other:
+   - every signer action has a matching approved intent;
+   - every token transfer out of the hot wallet was signed by the signer, for the signed recipient and amount;
+   - every settled payout is on chain;
+   - hot-wallet USDC and ETH on chain equal the ledger;
+   - the audit log's hash chain is intact and matches the checkpoints the signer holds.
+
+   Any unacknowledged critical finding **opens the circuit breaker** in the signer.
+
+Adding a payee, enrolling an approver and closing the breaker are intents too, and each needs two approvers. Closing the breaker also acknowledges the findings that opened it, so a known incident doesn't keep re-tripping it while any new discrepancy still does.
+
+## Attack lab
+
+The **Attack lab** page plays a compromised API server (or worse) against the real signer, chain and ledger. Nothing is mocked, and each attack is also an automated test (`apps/api/test/payouts.test.ts`).
+
+| Attack | Result | Stopped by |
+|---|---|---|
+| Swap the recipient after approval, including to another approved payee, and claim the old hash | Blocked | Approvals are signatures over the hash; the signer recomputes it |
+| Inflate the approved amount | Blocked | Same |
+| Replay approvals on a new payout | Blocked | The challenge is bound to one intent |
+| Approve with a passkey planted in the API's database | Blocked | Signer's own approver list |
+| Requester approves their own payout | Blocked | Requester never counts |
+| Approvers tricked into paying a new address | Blocked | Signer's own payee list plus cooling-off |
+| 60,000 USDC with two approvals (limit 50,000) | Blocked | Policy `forbid` beats any `permit` |
+| Send one approved payout to the signer ten times at once | Blocked | One transaction, one nonce |
+| Steal the hot wallet key and transfer directly | **Detected and contained** | Reconciliation finds the unsigned transfer and opens the breaker; the signer then refuses everything until two approvers reset it |
+| DB admin edits the audit log and recomputes every later hash | **Detected** | The rewritten chain no longer matches checkpoints held by the signer |
+
+**What this does not do:** a stolen key can still spend whatever the hot wallet holds. Preventing that needs the key in a KMS/HSM, or a smart-account allowance (for example a Safe with a spending limit). This system limits the damage (the hot wallet only holds a float, and the theft halts all payouts within one reconciliation interval) and makes it visible.
 
 ## Layout
 
 ```
 packages/ledger   double-entry ledger library (PostgreSQL)
-apps/api          read-only HTTP API (Fastify)
-apps/web          ledger UI (React, TanStack Query, Vite)
+packages/core     intent hashing, Cedar policy, passkey verification, token ABI (shared by API and signer)
+apps/signer       the signer: separate process and schema, the only holder of the hot wallet key
+apps/api          HTTP API: sign-in, intents, approvals, worker, reconciliation, audit log, attack lab
+apps/web          UI: payouts, payees, security, attack lab, ledger
+contracts         MockUSDC (6 decimals) for the local chain
 ```
+
+## Security notes
+
+- **Trust boundary.** The signer runs as its own process with its own schema. In production, give it its own database and a role the API can't use; here both share one Postgres for convenience. API→signer calls need a bearer token, but holding the token only lets a caller *ask*.
+- **Sessions.** Session cookies are HttpOnly and SameSite=Strict, and only a SHA-256 of each session token is stored. Writes that carry a foreign `Origin` are refused. Passkey sign-in and registration require user verification.
+- **Demo mode** (`DEMO_MODE`, default on, refused unless the chain id is 31337) allows signing in as demo users without a passkey, and server-held demo keys for Bob and Carol. Every real approval path still goes through WebAuthn verification in both the API and the signer.
+- **Append-only** tables: the ledger, the signer's log, refusals and anchors, approvals, and the audit log. Triggers reject UPDATE and DELETE. A database owner can disable triggers, which is exactly what the audit-rewrite attack does, and why checkpoints live with the signer.
+- **Keys.** The demo uses anvil's public development keys, and the signer refuses them on any chain other than 31337.
 
 ## Ledger UI (`apps/web`)
 
@@ -58,12 +132,13 @@ apps/web          ledger UI (React, TanStack Query, Vite)
 | `GET /v1/ledger/verify` | `{ ok, problems, checkedAt }` |
 | `GET /v1/currencies` | Display decimals per currency |
 
-- **Read-only by design.** There is no endpoint that posts to the ledger: in this system, money only moves through approved payout intents (phase 2). A test asserts that `POST`, `PUT`, `PATCH` and `DELETE` all return 404.
+- **The ledger API is read-only by design.** No endpoint posts to the ledger; only the worker does, after a payout settles on chain. A test asserts that `POST`, `PUT`, `PATCH` and `DELETE` on ledger routes all return 404.
+- Payout endpoints live under `/v1/auth`, `/v1/payees`, `/v1/intents`, `/v1/security`, `/v1/reconcile`, `/v1/audit` and, in demo mode, `/v1/demo`.
 - Amounts are decimal strings, never JSON numbers.
 - Unknown query parameters are rejected with 400. Fastify's default is to silently drop them; that default is turned off.
 - Errors have a stable shape `{ error: { code, message } }` and never include SQL or stack traces.
 - `verify` scans every entry, so concurrent calls share one scan and the result is reused for 5 seconds.
-- The API binds to `127.0.0.1` and has no authentication yet. Authentication arrives with the approval flow in phase 2.
+- The API binds to `127.0.0.1`. Put a TLS-terminating proxy in front of it and set `SECURE_COOKIES=true` before exposing it.
 
 ## Ledger (`packages/ledger`)
 
@@ -125,10 +200,19 @@ Errors are `LedgerError` with a `code`: `VALIDATION`, `UNKNOWN_ACCOUNT`, `ACCOUN
 ### Tests
 
 ```bash
-npm run db:up     # PostgreSQL 16 on localhost:5434
-npm test          # ledger, API and UI tests; each database test file gets a fresh database
+docker compose up -d --wait   # PostgreSQL and anvil
+npm test          # 88 tests: ledger, core, signer, API end-to-end, UI. Each database test file gets a fresh database,
+                  # and each chain test file its own random hot wallet and freshly deployed token
 npm run typecheck
 ```
+
+- **Core:** canonical intent hashing; the policy's decision and the name of every forbid that fired; passkey checks that reject another intent's signature, unknown credentials, a borrowed identity, a phishing origin, missing user verification and a tampered signature.
+- **Signer:** every refusal reason; idempotent concurrent signing; the 24-hour window moving with time; the payee cooling-off period; governance; the circuit breaker; append-only records; anchors.
+- **API end-to-end** (real Postgres, real anvil, real signer):
+  - request → two approvals → sign → broadcast → settle → ledger → reconciliation agrees to the wei;
+  - real passkey registration and enrollment;
+  - separation of duties and cross-origin refusal;
+  - all ten attacks.
 
 - **Behaviour:** balancing per currency, validation, idempotent replay (including a replay after the balance has been spent), `IDEMPOTENCY_CONFLICT`, overdraft rejection, single reversal, reversal of a reversal refused.
 - **Concurrency:** 20 copies of one request applied once; 20 withdrawals against a balance covering 10; 30 transfers in opposite directions without deadlock.
@@ -153,4 +237,5 @@ npm run typecheck
 - `.npmrc` sets `ignore-scripts=true`; CI installs with `npm ci --ignore-scripts`.
 - GitHub Actions are pinned to full commit SHAs, and checkout does not persist credentials.
 - CI fails on any `npm audit` finding of moderate severity or above.
+- The whole dependency tree, transitive packages included, was resolved with `npm install --before=<two weeks ago>`, so no installed version is newer than two weeks. Docker images are pinned by digest.
 - Dependencies are pinned to exact releases that have been public for at least two weeks, not the newest (for example vitest 5.0.5 rather than the 3-day-old 5.1.0, and vite 8.3.5 rather than 8.3.6, published the same day).

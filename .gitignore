@@ -6,3 +6,4 @@ dist/
 *.pem
 *.key
 *.log
+.demo-keys.json

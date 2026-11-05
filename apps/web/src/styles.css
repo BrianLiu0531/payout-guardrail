@@ -496,9 +496,14 @@ tr.selected > * {
 .metadata dt {
   color: var(--text-muted);
 }
+.metadata div {
+  max-width: 100%;
+}
 .metadata dd {
   margin: 0;
   font-family: var(--mono);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .load-more {
   margin-top: 12px;
@@ -525,7 +530,346 @@ tr.selected > * {
   color: var(--text-muted);
 }
 
+/* Session and navigation */
+.topbar-inner {
+  flex-wrap: wrap;
+}
+.nav {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 0 16px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.session {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.session select,
+.input {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  max-width: 100%;
+}
+.popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 20;
+  width: min(380px, calc(100vw - 32px));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+}
+.popover h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+/* Forms */
+.form-card h2 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 12px;
+}
+.field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+.field .input {
+  width: 100%;
+  color: var(--text);
+  font-size: 15px;
+}
+.field-wide {
+  grid-column: 1 / -1;
+}
+.amount-input,
+.mono {
+  font-family: var(--mono);
+}
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.form-error {
+  margin: 8px 0 0;
+  color: var(--bad);
+  font-size: 13px;
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.button-primary {
+  border: 1px solid var(--primary);
+  background: var(--primary);
+  color: var(--surface);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.button-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.button-link {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.inline-form .field {
+  flex: 1 1 260px;
+}
+
+/* Tabs */
+.tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.tabs button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tabs button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+.count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Intents */
+.intent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.intent-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+.intent-pending_approval {
+  border-left: 3px solid var(--warn);
+}
+.intent-refused,
+.intent-failed {
+  border-left: 3px solid var(--bad);
+}
+.intent-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 13px;
+}
+.intent-head time {
+  color: var(--text-muted);
+}
+.intent-summary {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+.intent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.notice {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.notice-warn {
+  background: var(--warn-soft);
+  color: var(--text);
+}
+.notice-bad {
+  background: var(--bad-soft);
+  color: var(--text);
+}
+code.address {
+  overflow-wrap: anywhere;
+}
+
+/* Security */
+.breaker {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+.breaker p {
+  margin: 4px 0 0;
+}
+.breaker-closed {
+  background: var(--ok-soft);
+}
+.breaker-open {
+  flex-direction: column;
+  background: var(--bad-soft);
+  border-color: var(--bad);
+}
+.findings {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.finding {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.finding-critical:not(.finding-acked) {
+  border-color: var(--bad);
+}
+.row-bad > * {
+  background: var(--bad-soft);
+}
+.detail-cell {
+  overflow-wrap: anywhere;
+  min-width: 200px;
+}
+.plain-list {
+  margin: 8px 0 16px;
+  padding-left: 20px;
+}
+.code-block {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font: 12.5px/1.55 var(--mono);
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+/* Attack lab */
+.attack-grid {
+  list-style: none;
+  margin: 24px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.attack p {
+  margin: 0 0 10px;
+}
+.steps {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  font-size: 13.5px;
+}
+.step {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 8px;
+}
+.step p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.step-tag {
+  align-self: start;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.step-attacker .step-tag {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+.step-blocked .step-tag {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.step-detected .step-tag {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.attack-summary {
+  margin: 12px 0 0 !important;
+  font-weight: 600;
+}
+
 @media (max-width: 560px) {
+  .popover {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    top: 64px;
+    width: auto;
+  }
   h1 {
     font-size: 24px;
   }

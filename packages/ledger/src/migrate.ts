@@ -6,8 +6,13 @@ import type pg from 'pg';
 const MIGRATIONS_DIR = fileURLToPath(new URL('../migrations/', import.meta.url));
 const LOCK_KEY = 'guardrail:migrations';
 
-/** Applies pending SQL migrations in file-name order, each in its own transaction. Returns the names applied. */
-export async function migrate(pool: pg.Pool): Promise<string[]> {
+/**
+ * Applies pending SQL migrations in file-name order, each in its own transaction. Returns the names applied.
+ * Other packages pass their own directory; file names share one table, so each package uses its own prefix
+ * (ledger 0xx, payouts 1xx, signer 2xx).
+ */
+export async function migrate(pool: pg.Pool, dir: string = MIGRATIONS_DIR): Promise<string[]> {
+  const MIGRATIONS = dir;
   const client = await pool.connect();
   try {
     await client.query('SELECT pg_advisory_lock(hashtext($1))', [LOCK_KEY]);
@@ -19,12 +24,12 @@ export async function migrate(pool: pg.Pool): Promise<string[]> {
     );
     const { rows } = await client.query<{ name: string }>('SELECT name FROM public.guardrail_migrations');
     const applied = new Set(rows.map((r) => r.name));
-    const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
+    const files = (await readdir(MIGRATIONS)).filter((f) => f.endsWith('.sql')).sort();
 
     const done: string[] = [];
     for (const file of files) {
       if (applied.has(file)) continue;
-      const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
+      const sql = await readFile(join(MIGRATIONS, file), 'utf8');
       try {
         await client.query('BEGIN');
         await client.query(sql);

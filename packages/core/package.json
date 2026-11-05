@@ -1,0 +1,12 @@
+{
+  "name": "@guardrail/core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@cedar-policy/cedar-wasm": "4.14.0",
+    "@simplewebauthn/server": "14.0.3",
+    "viem": "2.57.7"
+  }
+}

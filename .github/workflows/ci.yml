@@ -33,6 +33,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Local EVM chain for the signer and end-to-end tests (image pinned by digest).
+      - name: Start anvil
+        run: |
+          docker run -d --name anvil -p 8545:8545 --entrypoint anvil \
+            ghcr.io/foundry-rs/foundry:v1.4.3@sha256:409c397a8d9675d8c911e564727b959d0c76e5efb3193f512a69bf8b89a7f85f \
+            --host 0.0.0.0 --chain-id 31337
+          for i in $(seq 1 30); do
+            curl -sf -X POST -H 'content-type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' http://127.0.0.1:8545 && break
+            sleep 1
+          done
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=moderate
       - run: npm run typecheck

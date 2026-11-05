@@ -5,6 +5,8 @@
   "version": "0.1.0",
   "workspaces": [
     "packages/ledger",
+    "packages/core",
+    "apps/signer",
     "apps/api",
     "apps/web"
   ],
@@ -16,7 +18,9 @@
     "dev:web": "npm run dev -w @guardrail/web",
     "build": "npm run build -w @guardrail/web",
     "test": "vitest run",
-    "typecheck": "tsc -p packages/ledger && tsc -p apps/api && tsc -p apps/web"
+    "typecheck": "tsc -p packages/ledger && tsc -p packages/core && tsc -p apps/signer && tsc -p apps/api && tsc -p apps/web",
+    "dev:signer": "npm run dev -w @guardrail/signer",
+    "demo:reset": "docker compose down -v && docker compose up -d --wait && npm run seed"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

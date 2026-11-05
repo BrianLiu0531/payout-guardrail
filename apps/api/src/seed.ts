@@ -1,16 +1,22 @@
 import pg from 'pg';
-import { Ledger, migrate } from '@guardrail/ledger';
-import { seedDemo } from './demo.js';
+import { Ledger } from '@guardrail/ledger';
+import { ANVIL_DEPLOYER_KEY, apiConfig } from './config.js';
+import { seedAll } from './setup.js';
 
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL ?? 'postgres://guardrail:guardrail@localhost:5434/guardrail',
-});
+const cfg = apiConfig();
+const pool = new pg.Pool({ connectionString: cfg.databaseUrl });
 try {
-  await migrate(pool);
   const ledger = new Ledger(pool);
-  await seedDemo(ledger);
+  const { chain } = await seedAll(pool, ledger, {
+    rpcUrl: cfg.rpcUrl,
+    chainId: cfg.chainId,
+    hotKey: cfg.leakedKey,
+    deployerKey: ANVIL_DEPLOYER_KEY,
+    keysFile: cfg.demoKeysFile,
+    webauthn: cfg.webauthn,
+  });
   const problems = await ledger.verify();
-  console.log(`demo data loaded; verify: ${problems.length === 0 ? 'ok' : JSON.stringify(problems)}`);
+  console.log(`demo data loaded; token ${chain.token}, hot wallet ${chain.hotWallet}; ledger verify: ${problems.length === 0 ? 'ok' : JSON.stringify(problems)}`);
 } finally {
   await pool.end();
 }

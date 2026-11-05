@@ -7,7 +7,9 @@ import {
   type LedgerErrorCode,
   type Transaction,
 } from '@guardrail/ledger';
+import cookie from '@fastify/cookie';
 import { CURRENCIES } from './currencies.js';
+import { mapPayoutError, registerPayoutRoutes, type PayoutRouteOptions } from './payouts/routes.js';
 import type {
   AccountDto,
   ErrorDto,
@@ -23,6 +25,8 @@ export interface AppOptions {
   logger?: boolean;
   /** verify() scans every entry; results younger than this are reused. Default 5 s. */
   verifyCacheMs?: number;
+  /** Payout workflow (phase 2). Without it the API serves the read-only ledger only. */
+  payouts?: PayoutRouteOptions;
 }
 
 const STATUS: Record<LedgerErrorCode, number> = {
@@ -41,7 +45,7 @@ const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
  * Read-only ledger API. Nothing here can post: in this system money only moves
  * through approved payout intents (phase 2), never through a raw ledger endpoint.
  */
-export function buildApp({ ledger, logger = false, verifyCacheMs = 5_000 }: AppOptions): FastifyInstance {
+export function buildApp({ ledger, logger = false, verifyCacheMs = 5_000, payouts }: AppOptions): FastifyInstance {
   const app = Fastify({
     logger,
     // Reject unknown parameters instead of silently dropping them (Fastify's default).
@@ -59,6 +63,8 @@ export function buildApp({ ledger, logger = false, verifyCacheMs = 5_000 }: AppO
       const body: ErrorDto = { error: { code: err.code, message: err.message, details: err.details } };
       return reply.status(STATUS[err.code]).send(body);
     }
+    const mapped = mapPayoutError(err);
+    if (mapped) return reply.status(mapped.status).send(mapped.body);
     const e = err as { validation?: unknown; statusCode?: number; message?: string };
     if (e.validation) {
       const body: ErrorDto = { error: { code: 'VALIDATION', message: e.message ?? 'invalid request' } };
@@ -163,6 +169,14 @@ export function buildApp({ ledger, logger = false, verifyCacheMs = 5_000 }: AppO
     }
     return cached.result;
   });
+
+  if (payouts) {
+    // Cookies, sessions and the origin check apply only inside this scope.
+    app.register(async (scope) => {
+      await scope.register(cookie);
+      registerPayoutRoutes(scope, payouts);
+    });
+  }
 
   return app;
 }

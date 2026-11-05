@@ -12,3 +12,16 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # Local EVM chain. State is kept in a volume so the demo survives restarts.
+  chain:
+    image: ghcr.io/foundry-rs/foundry:v1.4.3@sha256:409c397a8d9675d8c911e564727b959d0c76e5efb3193f512a69bf8b89a7f85f
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--state", "/data/anvil.json", "--state-interval", "5"]
+    user: root
+    ports:
+      - "8545:8545"
+    volumes:
+      - chain-data:/data
+
+volumes:
+  chain-data:

@@ -6,6 +6,13 @@ import type {
   TrialBalanceDto,
   VerifyDto,
 } from '../../api/src/dto.js';
+import type {
+  AuthenticationResponseJSON,
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+} from '@simplewebauthn/browser';
+import type { Attack, AttackResult, AuditEntry, Config, Intent, Me, Payee, ReconReport, Security, User, UserSummary } from './payoutTypes.js';
 
 export type {
   AccountDto,
@@ -44,6 +51,54 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
+async function send<T>(method: 'POST', path: string, body: unknown = {}): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    credentials: 'same-origin',
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = (await res.json().catch(() => null)) as (ErrorDto & { error: { details?: Record<string, unknown> } }) | null;
+  if (!res.ok) {
+    const err = new ApiError(res.status, json?.error?.code ?? 'HTTP_ERROR', json?.error?.message ?? `${res.status} ${res.statusText}`);
+    (err as ApiError & { details?: unknown }).details = json?.error?.details;
+    throw err;
+  }
+  return json as T;
+}
+
+export const payoutApi = {
+  me: () => getJson<Me>('/v1/auth/me'),
+  users: () => getJson<{ users: UserSummary[] }>('/v1/auth/users'),
+  demoLogin: (userId: string) => send<{ user: User }>('POST', '/v1/auth/demo-login', { userId }),
+  logout: () => send<{ ok: true }>('POST', '/v1/auth/logout'),
+  registerOptions: (name: string, userId: string) =>
+    send<{ challengeId: string; options: PublicKeyCredentialCreationOptionsJSON }>('POST', '/v1/auth/register/options', { name, userId }),
+  registerVerify: (challengeId: string, response: RegistrationResponseJSON) =>
+    send<{ user: User; enrollmentIntent: string }>('POST', '/v1/auth/register/verify', { challengeId, response }),
+  loginOptions: () => send<{ challengeId: string; options: PublicKeyCredentialRequestOptionsJSON }>('POST', '/v1/auth/login/options'),
+  loginVerify: (challengeId: string, response: AuthenticationResponseJSON) =>
+    send<{ user: User }>('POST', '/v1/auth/login/verify', { challengeId, response }),
+
+  config: () => getJson<Config>('/v1/config'),
+  payees: () => getJson<{ payees: Payee[] }>('/v1/payees'),
+  addPayee: (name: string, address: string) => send<Intent>('POST', '/v1/payees', { name, address }),
+  intents: (kind?: string) => getJson<{ intents: Intent[] }>(`/v1/intents?limit=100${kind ? `&kind=${kind}` : ''}`),
+  proposePayout: (body: { payeeId: string; amount: string; memo: string; expenseAccount: string }) =>
+    send<Intent>('POST', '/v1/intents/payout', body),
+  proposeBreakerReset: (reason: string) => send<Intent>('POST', '/v1/intents/breaker-reset', { reason }),
+  approvalOptions: (id: string) => send<{ options: PublicKeyCredentialRequestOptionsJSON }>('POST', `/v1/intents/${id}/approval-options`),
+  approve: (id: string, response: AuthenticationResponseJSON) => send<Intent>('POST', `/v1/intents/${id}/approve`, { response }),
+  demoApprove: (intentId: string, userId: string) => send<Intent>('POST', '/v1/demo/approve', { intentId, userId }),
+  cancel: (id: string) => send<Intent>('POST', `/v1/intents/${id}/cancel`),
+
+  security: () => getJson<Security>('/v1/security'),
+  reconcile: () => send<ReconReport>('POST', '/v1/reconcile'),
+  audit: () => getJson<{ entries: AuditEntry[] }>('/v1/audit?limit=50'),
+  attacks: () => getJson<{ attacks: Attack[] }>('/v1/demo/attacks'),
+  runAttack: (id: string) => send<AttackResult>('POST', `/v1/demo/attacks/${id}/run`),
+};
 
 export const api = {
   currencies: (signal?: AbortSignal) => getJson<{ currencies: CurrencyDto[] }>('/v1/currencies', signal),
