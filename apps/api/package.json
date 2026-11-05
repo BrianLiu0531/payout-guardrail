@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "admin": "tsx src/admin.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.3",

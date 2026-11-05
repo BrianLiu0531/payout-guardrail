@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type pg from 'pg';
-import { keccak256, type Hex } from 'viem';
+import { getAddress, keccak256, type Hex } from 'viem';
 import {
   intentChallenge,
   intentHash,
+  listScreen,
+  SAMPLE_SANCTIONED_ADDRESS,
   SoftAuthenticator,
   type Approval,
   type Intent,
@@ -181,6 +183,21 @@ describe('governance', () => {
 
     clock = new Date(clock.getTime() + 121_000);
     await expect(signer.signPayout({ intent: p, approvals: [approve(bob, 'bob', p)] })).resolves.toMatchObject({ replayed: false });
+  });
+
+  it('never adds a sanctioned address, and stops paying a payee once it is listed', async () => {
+    const add: Intent = {
+      kind: 'payee_add', intentId: randomUUID(), chainId: 31337, payeeId: 'listed', name: 'Listed', address: getAddress(SAMPLE_SANCTIONED_ADDRESS),
+      createdBy: 'alice', createdAt: clock.toISOString(),
+    };
+    const err = await refusal(signer.applyGovernance({ intent: add, approvals: [approve(bob, 'bob', add), approve(carol, 'carol', add)] }));
+    expect(err.detail.policies).toEqual(['sanctioned-payee']);
+
+    // Acme gets listed after it was approved: the next payout to it is refused.
+    const strict = new Signer({ pool, account: chain.hot, chain: chain.publicClient, webauthn, now: () => clock, sanctions: listScreen([acme]) });
+    const p = payout({ amount: (100n * USDC).toString() });
+    const e2 = await refusal(strict.signPayout({ intent: p, approvals: [approve(bob, 'bob', p)] }));
+    expect(e2.detail.policies).toContain('sanctioned-recipient');
   });
 
   it('refuses a payout whose payee id does not own the address', async () => {

@@ -20,7 +20,10 @@
     "test": "vitest run",
     "typecheck": "tsc -p packages/ledger && tsc -p packages/core && tsc -p apps/signer && tsc -p apps/api && tsc -p apps/web",
     "dev:signer": "npm run dev -w @guardrail/signer",
-    "demo:reset": "docker compose down -v && docker compose up -d --wait && npm run seed"
+    "demo:reset": "docker compose down -v && docker compose up -d --wait && npm run seed",
+    "sanctions:update": "node scripts/update-sanctions.mjs",
+    "admin": "npm run admin -w @guardrail/api --",
+    "signer:admin": "npm run admin -w @guardrail/signer --"
   },
   "devDependencies": {
     "@types/node": "22.20.5",

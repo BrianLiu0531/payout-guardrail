@@ -6,7 +6,9 @@ import {
   countApprovals,
   intentChallenge,
   intentHash,
+  listScreen,
   parseIntent,
+  SAMPLE_SANCTIONED_ADDRESS,
   requiredApprovals,
   SoftAuthenticator,
   verifyApproval,
@@ -56,7 +58,7 @@ describe('intent hash', () => {
 });
 
 describe('policy (Cedar)', () => {
-  const facts = { intentId: payout.intentId, amount: 2_500n * USDC, payeeActive: true, payeeAgeSeconds: 3600 };
+  const facts = { intentId: payout.intentId, amount: 2_500n * USDC, payeeActive: true, payeeAgeSeconds: 3600, recipientSanctioned: false };
   const quiet = { spentToday: 0n, breakerOpen: false };
 
   it('lets requesters propose and refuses approvers', () => {
@@ -70,6 +72,7 @@ describe('policy (Cedar)', () => {
       [{}, { spentToday: 98_000n * USDC }, 'rolling-24h-limit'],
       [{ payeeActive: false, payeeAgeSeconds: 0 }, {}, 'payee-must-be-active'],
       [{ payeeAgeSeconds: 30 }, {}, 'payee-cooldown'],
+      [{ recipientSanctioned: true }, {}, 'sanctioned-recipient'],
     ];
     for (const [f, c, id] of cases) {
       const d = canPropose({ id: 'alice', role: 'requester' }, { ...facts, ...f }, { ...quiet, ...c });
@@ -95,6 +98,14 @@ describe('policy (Cedar)', () => {
   it('needs two approvers for governance changes', () => {
     expect(canApplyGovernance('g1', 1).allowed).toBe(false);
     expect(canApplyGovernance('g1', 2).allowed).toBe(true);
+    expect(canApplyGovernance('g1', 3, true).reasons).toEqual(['sanctioned-payee']);
+  });
+
+  it('screens addresses against the OFAC snapshot, case-insensitively', async () => {
+    const screen = listScreen();
+    expect((await screen.check(SAMPLE_SANCTIONED_ADDRESS.toUpperCase().replace('0X', '0x'))).listed).toBe(true);
+    expect((await screen.check(payout.to)).listed).toBe(false);
+    expect((await listScreen([payout.to]).check(payout.to)).listed).toBe(true);
   });
 });
 

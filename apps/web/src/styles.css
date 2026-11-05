@@ -294,6 +294,7 @@ button {
 }
 .card-figures dt {
   color: var(--text-muted);
+  white-space: nowrap;
 }
 .card-figures dd {
   margin: 0;
@@ -755,11 +756,14 @@ code.address {
 .breaker p {
   margin: 4px 0 0;
 }
+.breaker .inline-form {
+  margin-top: 12px;
+}
 .breaker-closed {
   background: var(--ok-soft);
 }
 .breaker-open {
-  flex-direction: column;
+  display: block;
   background: var(--bad-soft);
   border-color: var(--bad);
 }

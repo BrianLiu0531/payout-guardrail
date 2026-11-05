@@ -9,11 +9,16 @@ import { Reconciler } from './payouts/reconcile.js';
 import { Payouts } from './payouts/service.js';
 import { HttpSigner } from './payouts/signerPort.js';
 import { PayoutWorker } from './payouts/worker.js';
+import { applyRoles } from './roles.js';
 import { migrateAll, readChainSettings } from './setup.js';
 
 const cfg = apiConfig();
-const pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
-await migrateAll(pool);
+// Migrations and grants run as the owner; requests are served as guardrail_api.
+const owner = new pg.Pool({ connectionString: cfg.databaseUrl, max: 2 });
+await migrateAll(owner);
+await applyRoles(owner, cfg.rolePasswords);
+if (!cfg.demoMode) await owner.end();
+const pool = new pg.Pool({ connectionString: cfg.apiDatabaseUrl, max: 10 });
 
 const ledger = new Ledger(pool);
 const chainSettings = await readChainSettings(pool);
@@ -39,7 +44,8 @@ const app = buildApp({
     demoMode: cfg.demoMode,
     secureCookies: cfg.secureCookies,
     bots,
-    attackDeps: bots ? { payouts, signer, bots, chain, reconciler, rpcUrl: cfg.rpcUrl, leakedKey: cfg.leakedKey } : undefined,
+    // The owner connection is kept only in demo mode, for the attack that plays a rogue DB admin.
+    attackDeps: bots ? { payouts, signer, bots, chain, reconciler, rpcUrl: cfg.rpcUrl, leakedKey: cfg.leakedKey, adminPool: owner } : undefined,
   },
 });
 
@@ -70,6 +76,7 @@ const shutdown = async () => {
   stopRecon();
   await app.close();
   await pool.end();
+  if (cfg.demoMode) await owner.end();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);

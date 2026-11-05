@@ -1,5 +1,6 @@
 ﻿import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import type { Pool } from 'pg';
 import { createWalletClient, http, parseUnits, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import {
@@ -8,6 +9,7 @@ import {
   localChain,
   mockUsdcAbi,
   parseIntent,
+  SAMPLE_SANCTIONED_ADDRESS,
   SoftAuthenticator,
   type Approval,
   type Intent,
@@ -67,6 +69,8 @@ export interface AttackDeps {
   rpcUrl: string;
   /** The hot wallet key, used only to play a thief who has stolen it. */
   leakedKey: Hex;
+  /** A database-owner connection, used only to play a rogue DB admin. The API itself runs without one. */
+  adminPool: Pool;
 }
 
 export const ATTACKS = [
@@ -76,6 +80,7 @@ export const ATTACKS = [
   { id: 'forged-approver', title: 'Approve with a planted passkey', blurb: "The attacker adds their own passkey to the API's database and approves." },
   { id: 'self-approval', title: 'Approve your own payout', blurb: 'A requester who is also an approver signs off on their own request.' },
   { id: 'unknown-payee', title: 'Pay an address nobody vetted', blurb: 'Approvers are tricked into approving a payout to a new address.' },
+  { id: 'sanctioned-payee', title: 'Whitelist a sanctioned address', blurb: 'A compromised API skips its own screening and gets two approvers to add an OFAC-listed address.' },
   { id: 'over-limit', title: 'Exceed the per-payout limit', blurb: 'Two approvers sign a 60,000 USDC payout; the limit is 50,000.' },
   { id: 'double-spend', title: 'Execute one payout ten times', blurb: 'The same approved payout is sent to the signer ten times at once.' },
   { id: 'leaked-key', title: 'Steal the hot wallet key', blurb: 'The key leaks and the thief transfers USDC directly, bypassing everything.' },
@@ -181,6 +186,23 @@ export async function runAttack(id: AttackId, deps: AttackDeps): Promise<AttackR
       steps.push({ label: 'Adding the address as a payee', outcome: 'info', detail: 'Needs its own two-approver change, and then a cooling-off period before any payout to it is signed.' });
       return ok ? done('not_blocked', 'An unvetted address was paid.') : done('blocked', "Only addresses on the signer's own payee list can be paid, however many people approve.");
     }
+    case 'sanctioned-payee': {
+      const listed = SAMPLE_SANCTIONED_ADDRESS;
+      const add = parseIntent({
+        kind: 'payee_add', intentId: randomUUID(), chainId: payouts.chain.chainId, payeeId: 'consulting-llc', name: 'Consulting LLC',
+        address: listed, createdBy: 'alice', createdAt: new Date().toISOString(),
+      });
+      steps.push({ label: 'Bob and Carol approve adding "Consulting LLC" as a payee', outcome: 'attacker', detail: `Address ${listed} is on the OFAC SDN list; the compromised API skipped its own check.` });
+      try {
+        await signer.applyGovernance({ intent: add, approvals: approvedBy(add, 'bob', 'carol') });
+        steps.push({ label: 'The signer applies the change', outcome: 'attacker', detail: 'The address is now a payee.' });
+        return done('not_blocked', 'A sanctioned address was whitelisted.');
+      } catch (err) {
+        if (!(err instanceof SignerRefused)) throw err;
+        steps.push({ label: 'The signer screens the address itself', outcome: 'blocked', detail: `Refused (${err.reason}): ${err.message}; ${String(err.detail.sanctions ?? '')}` });
+      }
+      return done('blocked', 'The signer screens every new payee and every recipient against the sanctions list itself, so no number of approvals can whitelist a listed address.');
+    }
     case 'over-limit': {
       const intent = draft({ amount: USDC('60000').toString() });
       const ok = await tryToSign('Bob and Carol approve 60,000 USDC', intent, approvedBy(intent, 'bob', 'carol'));
@@ -235,12 +257,21 @@ export async function runAttack(id: AttackId, deps: AttackDeps): Promise<AttackR
       if (!head || head.seq < 3) throw new PayoutError('CONFLICT', 'not enough audit history yet; approve a payout first');
       const { rows } = await payouts.pool.query("SELECT * FROM payouts.audit WHERE action = 'approval.recorded' ORDER BY seq DESC LIMIT 1");
       const target = rows[0] ?? (await payouts.pool.query('SELECT * FROM payouts.audit WHERE seq = $1', [head.seq - 1])).rows[0];
-      const c = await payouts.pool.connect();
+      // First with the API's own database role, as an attacker inside the API process would.
+      const viaApi = await payouts.pool
+        .query("UPDATE payouts.audit SET actor = 'mallory' WHERE seq = $1", [target.seq])
+        .then(() => 'succeeded', (e: Error) => e.message);
+      steps.push({
+        label: "Attacker in the API process edits the audit log with the API's database role",
+        outcome: viaApi === 'succeeded' ? 'attacker' : 'blocked',
+        detail: viaApi === 'succeeded' ? 'The update went through.' : `Refused by Postgres: ${viaApi}. The API role is insert-only on the audit log and owns no table.`,
+      });
+      const c = await deps.adminPool.connect();
       try {
         await c.query('BEGIN');
         await c.query('ALTER TABLE payouts.audit DISABLE TRIGGER audit_append_only');
         await c.query("UPDATE payouts.audit SET actor = 'mallory' WHERE seq = $1", [target.seq]);
-        steps.push({ label: `DB admin disables the append-only trigger and edits entry ${target.seq}`, outcome: 'attacker', detail: `"${target.action}" by ${target.actor} now says mallory.` });
+        steps.push({ label: `A rogue DB admin (table owner) disables the append-only trigger and edits entry ${target.seq}`, outcome: 'attacker', detail: `"${target.action}" by ${target.actor} now says mallory.` });
         // A careful attacker then recomputes every later hash so the chain verifies on its own.
         const { rows: later } = await c.query('SELECT * FROM payouts.audit WHERE seq >= $1 ORDER BY seq', [target.seq]);
         const { rows: before } = await c.query('SELECT hash FROM payouts.audit WHERE seq = $1', [Number(target.seq) - 1]);

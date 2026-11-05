@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts"
+    "start": "tsx src/server.ts",
+    "admin": "tsx src/admin.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1154.0",
     "@guardrail/core": "0.1.0",
     "@guardrail/ledger": "0.1.0",
     "fastify": "5.12.7",

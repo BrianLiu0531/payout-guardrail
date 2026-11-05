@@ -25,6 +25,8 @@ export interface PayoutFacts {
   payeeActive: boolean;
   /** Seconds since the payee became active; 0 when inactive. */
   payeeAgeSeconds: number;
+  /** The recipient is on a sanctions list. */
+  recipientSanctioned: boolean;
 }
 
 export interface PayoutContext {
@@ -83,7 +85,12 @@ function evaluate(
 const payoutResource = (f: PayoutFacts) => ({
   type: 'Payout',
   id: f.intentId,
-  attrs: { amount: long(f.amount), payeeActive: f.payeeActive, payeeAgeSeconds: Math.max(0, Math.floor(f.payeeAgeSeconds)) },
+  attrs: {
+    amount: long(f.amount),
+    payeeActive: f.payeeActive,
+    payeeAgeSeconds: Math.max(0, Math.floor(f.payeeAgeSeconds)),
+    recipientSanctioned: f.recipientSanctioned,
+  },
 });
 
 const payoutContext = (c: PayoutContext) => ({
@@ -108,11 +115,11 @@ export function canSign(facts: PayoutFacts, context: PayoutContext): Decision {
 }
 
 /** May the signer apply this governance change (new payee, new approver, breaker reset)? */
-export function canApplyGovernance(intentId: string, approvals: number): Decision {
+export function canApplyGovernance(intentId: string, approvals: number, sanctioned = false): Decision {
   return evaluate(
     { type: 'Signer', id: 'hot-wallet', attrs: {} },
     'apply_governance',
-    { type: 'Governance', id: intentId, attrs: {} },
+    { type: 'Governance', id: intentId, attrs: { sanctioned } },
     { approvals },
   );
 }

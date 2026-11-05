@@ -22,7 +22,11 @@ when { context.spentToday + resource.amount > 100000000000 };
 forbid (principal, action, resource is Payout)
 unless { resource.payeeActive };
 
-@id("payee-cooldown")           // demo: 2 minutes. Production: 86400 (24 hours)
+@id("sanctioned-recipient")     // OFAC SDN or the configured screening provider
+forbid (principal, action, resource is Payout)
+when { resource.recipientSanctioned };
+
+@id("payee-cooldown")          // demo: 2 minutes. Production: 86400 (24 hours)
 forbid (principal, action, resource is Payout)
 when { resource.payeeAgeSeconds < 120 };
 
@@ -45,3 +49,7 @@ when { context.breakerOpen };
 @id("governance-two-approvers")
 permit (principal is Signer, action == Action::"apply_governance", resource is Governance)
 when { context.approvals >= 2 };
+
+@id("sanctioned-payee")         // a listed address can never become a payee
+forbid (principal, action == Action::"apply_governance", resource is Governance)
+when { resource.sanctioned };

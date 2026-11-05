@@ -8,6 +8,8 @@ It is the outbound half of an on-chain money system whose inbound half already e
 
 > **Testnet only.** This is a reference implementation and portfolio project. It reduces the damage a compromised component can do; it does not make a treasury "hack-proof".
 
+![Attack lab: a recipient swap is blocked; a stolen key is detected and the circuit breaker opens](docs/attack-lab.gif)
+
 ## Status
 
 | Phase | Scope | State |
@@ -15,7 +17,7 @@ It is the outbound half of an on-chain money system whose inbound half already e
 | 1 | Postgres double-entry ledger, property-based tests, read-only ledger API and UI | **Done** |
 | 2 | Payout intents, Cedar policy, passkey (WebAuthn) approvals, separate signer, durable worker, sign-in | **Done** |
 | 3 | Intent-bound signing, four-way reconciliation, circuit breaker, tamper-evident audit log with signer-held checkpoints, attack lab | **Done** |
-| 4 | KMS/HSM signer backend, sanctions screening, Base Sepolia deployment | next |
+| 4 | KMS signer backend, OFAC sanctions screening, least-privilege database roles, Base Sepolia install path | **Done** (Sepolia: verified read-only; payouts need a funded wallet) |
 
 ## Running it
 
@@ -23,8 +25,8 @@ Needs Node 22+ and Docker.
 
 ```bash
 npm install
-docker compose up -d --wait   # PostgreSQL 16 on :5434 and a local EVM chain (anvil) on :8545
-npm run seed                  # ledger history, demo token, users, payees, signer bootstrap
+docker compose up -d --wait   # PostgreSQL 16 on :5434, a local EVM chain (anvil) on :8545, local KMS on :8090
+npm run seed                  # ledger history, demo token, users, payees, signer bootstrap, database roles
 npm run dev:signer            # signer on 127.0.0.1:8788 (holds the hot wallet key)
 npm run dev:api               # API on 127.0.0.1:8787, with the payout worker and reconciler
 npm run dev:web               # http://localhost:5173 (open this)
@@ -75,7 +77,7 @@ Adding a payee, enrolling an approver and closing the breaker are intents too, a
 
 ## Attack lab
 
-The **Attack lab** page plays a compromised API server (or worse) against the real signer, chain and ledger. Nothing is mocked, and each attack is also an automated test (`apps/api/test/payouts.test.ts`).
+The **Attack lab** page plays a compromised API server (or worse) against the real signer, chain and ledger. Nothing is mocked, and each of the eleven attacks is also an automated test (`apps/api/test/payouts.test.ts`).
 
 | Attack | Result | Stopped by |
 |---|---|---|
@@ -85,12 +87,36 @@ The **Attack lab** page plays a compromised API server (or worse) against the re
 | Approve with a passkey planted in the API's database | Blocked | Signer's own approver list |
 | Requester approves their own payout | Blocked | Requester never counts |
 | Approvers tricked into paying a new address | Blocked | Signer's own payee list plus cooling-off |
+| Whitelist an OFAC-listed address with two approvals, skipping the API's screening | Blocked | The signer screens every new payee and every recipient itself |
 | 60,000 USDC with two approvals (limit 50,000) | Blocked | Policy `forbid` beats any `permit` |
 | Send one approved payout to the signer ten times at once | Blocked | One transaction, one nonce |
 | Steal the hot wallet key and transfer directly | **Detected and contained** | Reconciliation finds the unsigned transfer and opens the breaker; the signer then refuses everything until two approvers reset it |
-| DB admin edits the audit log and recomputes every later hash | **Detected** | The rewritten chain no longer matches checkpoints held by the signer |
+| Edit the audit log: first from inside the API, then as a DB admin who recomputes every later hash | Blocked, then **detected** | The API's database role can't update the log at all; the admin's rewritten chain no longer matches checkpoints held by the signer |
 
-**What this does not do:** a stolen key can still spend whatever the hot wallet holds. Preventing that needs the key in a KMS/HSM, or a smart-account allowance (for example a Safe with a spending limit). This system limits the damage (the hot wallet only holds a float, and the theft halts all payouts within one reconciliation interval) and makes it visible.
+**What this does not do:** a stolen key can still spend whatever the hot wallet holds. The KMS backend (below) means there is no key file to steal: an attacker needs the signer's KMS permissions, which are logged and revocable. A smart-account allowance (for example a Safe with a spending limit) would cap even that. What this system guarantees is that the damage is limited and visible: the hot wallet only holds a float, and a theft halts all payouts within one reconciliation interval.
+
+## Running on Base Sepolia
+
+Demo mode is refused on any chain other than the local one. On Base Sepolia (chain 84532, Circle's test USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`):
+
+```bash
+export CHAIN_ID=84532 CHAIN_RPC_URL=https://sepolia.base.org DEMO_MODE=false
+export SIGNER_KMS_KEY_ID=...            # or SIGNER_PRIVATE_KEY for a throwaway testnet key
+npm run signer:admin -- address         # the hot wallet; fund it with Sepolia ETH and https://faucet.circle.com
+HOT_WALLET=0x... npm run admin -- network-check   # read-only: chain id, token, balances
+HOT_WALLET=0x... npm run admin -- network-setup   # accounts, opening balances read from chain, settings, roles
+TOKEN_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e npm run signer:admin -- bootstrap
+npm run dev:signer & npm run dev:api & npm run dev:web
+```
+
+Then bring up the first approvers:
+
+1. Two people register passkeys with **New approver**.
+2. `npm run admin -- pending-approvers` prints the enrollment commands to run on the signer host. That host enrolls at most two approvers this way; after that the bootstrap window is closed for good.
+3. `npm run admin -- set-role <user> requester` lets someone request payouts.
+4. Add payees through the UI. Each needs two approvals.
+
+`network-check` has been run against Base Sepolia; the full install was rehearsed on anvil (`apps/api/test/network.test.ts`). Running real payouts there needs a funded wallet.
 
 ## Layout
 
@@ -105,7 +131,22 @@ contracts         MockUSDC (6 decimals) for the local chain
 
 ## Security notes
 
-- **Trust boundary.** The signer runs as its own process with its own schema. In production, give it its own database and a role the API can't use; here both share one Postgres for convenience. API→signer calls need a bearer token, but holding the token only lets a caller *ask*.
+- **Trust boundary.** The signer runs as its own process. API→signer calls need a bearer token, but holding the token only lets a caller *ask*.
+- **Database roles.** Migrations run as the owner. At runtime the API runs as `guardrail_api` and the signer as `guardrail_signer` (created by `npm run seed`):
+  - `guardrail_api` cannot read the signer's schema.
+  - It cannot update or delete ledger history, approvals or the audit log.
+  - Owning no table, it cannot disable a trigger.
+  - `guardrail_signer` sees only its own schema.
+
+  The end-to-end tests run as these roles, and a test asserts each denial. In production, give the signer its own database as well.
+- **Sanctions screening.** Every new payee and every payout recipient is checked against the OFAC SDN list of Ethereum addresses, by the API and again by the signer. Two Cedar policies enforce it: `sanctioned-payee` and `sanctioned-recipient`. A payee that gets listed after it was approved stops being payable.
+  - The list is a committed snapshot (`packages/core/data/sanctions-eth.json`, 123 addresses). It comes from [0xB10C/ofac-sanctioned-digital-currency-addresses](https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses), MIT licensed, with data from US Treasury OFAC.
+  - Refresh it with `npm run sanctions:update`.
+  - A commercial screening API fits behind the same `SanctionsScreen` interface.
+- **KMS signer.** Set `SIGNER_KMS_KEY_ID` (an `ECC_SECG_P256K1` signing key) and the signer signs through AWS KMS instead of a key in memory.
+  - It derives the address from the KMS public key, normalises `s` (EIP-2) and recovers the parity.
+  - It is tested end to end against [local-kms](https://github.com/nsmithuk/local-kms): a payout signed inside KMS is accepted by the chain.
+  - It has not been run against real AWS KMS from this repo.
 - **Sessions.** Session cookies are HttpOnly and SameSite=Strict, and only a SHA-256 of each session token is stored. Writes that carry a foreign `Origin` are refused. Passkey sign-in and registration require user verification.
 - **Demo mode** (`DEMO_MODE`, default on, refused unless the chain id is 31337) allows signing in as demo users without a passkey, and server-held demo keys for Bob and Carol. Every real approval path still goes through WebAuthn verification in both the API and the signer.
 - **Append-only** tables: the ledger, the signer's log, refusals and anchors, approvals, and the audit log. Triggers reject UPDATE and DELETE. A database owner can disable triggers, which is exactly what the audit-rewrite attack does, and why checkpoints live with the signer.
@@ -200,8 +241,8 @@ Errors are `LedgerError` with a `code`: `VALIDATION`, `UNKNOWN_ACCOUNT`, `ACCOUN
 ### Tests
 
 ```bash
-docker compose up -d --wait   # PostgreSQL and anvil
-npm test          # 88 tests: ledger, core, signer, API end-to-end, UI. Each database test file gets a fresh database,
+docker compose up -d --wait   # PostgreSQL, anvil, local KMS
+npm test          # 99 tests: ledger, core, signer, KMS, API end-to-end, network install, UI. Each database test file gets a fresh database,
                   # and each chain test file its own random hot wallet and freshly deployed token
 npm run typecheck
 ```
@@ -212,7 +253,7 @@ npm run typecheck
   - request → two approvals → sign → broadcast → settle → ledger → reconciliation agrees to the wei;
   - real passkey registration and enrollment;
   - separation of duties and cross-origin refusal;
-  - all ten attacks.
+  - all eleven attacks, run as the least-privilege database roles.
 
 - **Behaviour:** balancing per currency, validation, idempotent replay (including a replay after the balance has been spent), `IDEMPOTENCY_CONFLICT`, overdraft rejection, single reversal, reversal of a reversal refused.
 - **Concurrency:** 20 copies of one request applied once; 20 withdrawals against a balance covering 10; 30 transfers in opposite directions without deadlock.
@@ -229,8 +270,8 @@ npm run typecheck
 
 ### Operating notes
 
-- Run the application as a database role that has only `SELECT` and `INSERT` on `ledger.transactions` and `ledger.entries` and `UPDATE` on `ledger.balances`. The append-only triggers stop mistakes; table ownership must stay with a separate migration role so the triggers themselves can't be dropped by the application.
-- `verify()` scans all entries. Schedule it (for example nightly) and alert on any result.
+- The API runs as `guardrail_api`, which has only `SELECT` and `INSERT` on `ledger.transactions` and `ledger.entries` and `UPDATE` on `ledger.balances` (`apps/api/src/roles.ts`). Table ownership stays with the migration role, so the application can't drop the triggers.
+- Reconciliation compares the ledger with the chain every 15 seconds. `verify()` scans all entries; schedule it (for example nightly) and alert on any result.
 
 ## Supply chain
 

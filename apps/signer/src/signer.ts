@@ -8,6 +8,8 @@ import {
   encodeTransfer,
   intentHash,
   IntentError,
+  listScreen,
+  type SanctionsScreen,
   parseIntent,
   TRANSFER_GAS,
   type Approval,
@@ -107,6 +109,8 @@ export interface SignerOptions {
   account: LocalAccount;
   chain: PublicClient;
   webauthn: WebAuthnSettings;
+  /** Sanctions screening; defaults to the committed OFAC snapshot. */
+  sanctions?: SanctionsScreen;
   /** Overridable clock for tests. */
   now?: () => Date;
 }
@@ -124,12 +128,14 @@ export class Signer {
   private readonly chain: PublicClient;
   private readonly webauthn: WebAuthnSettings;
   private readonly now: () => Date;
+  private readonly sanctions: SanctionsScreen;
 
   constructor(opts: SignerOptions) {
     this.pool = opts.pool;
     this.account = opts.account;
     this.chain = opts.chain;
     this.webauthn = opts.webauthn;
+    this.sanctions = opts.sanctions ?? listScreen();
     this.now = opts.now ?? (() => new Date());
   }
 
@@ -169,6 +175,33 @@ export class Signer {
           [p.address, p.chainId, p.payeeId, p.name, p.activatedAt],
         );
       }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Install-time enrollment of the first approvers on the signer host. Closes for good once two
+   * approvers exist: from then on only an approved approver_add intent can add one.
+   */
+  async enrollBootstrapApprover(a: { userId: string; credentialId: string; publicKey: Uint8Array }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rowCount } = await client.query('SELECT 1 FROM signer.state FOR UPDATE');
+      if (!rowCount) throw new SignerRefusal('not_bootstrapped', 'run bootstrap first');
+      const { rows } = await client.query<{ n: number }>('SELECT count(*)::int AS n FROM signer.approvers');
+      if (rows[0]!.n >= 2) {
+        throw new SignerRefusal('policy_denied', 'the bootstrap window is closed: add approvers with an approved approver_add intent');
+      }
+      await client.query(
+        `INSERT INTO signer.approvers (credential_id, user_id, public_key, enrolled_by) VALUES ($1, $2, $3, 'bootstrap')`,
+        [a.credentialId, a.userId, Buffer.from(a.publicKey)],
+      );
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -223,6 +256,7 @@ export class Signer {
       return this.refuse(new SignerRefusal('invalid_intent', 'not a payout intent'), intent.intentId, hash);
     }
     const approvals = await countApprovals(req.approvals ?? [], hash, intent.createdBy, this.lookup, this.webauthn);
+    const screening = await this.sanctions.check(intent.to);
 
     const client = await this.pool.connect();
     let refusal: SignerRefusal | null = null;
@@ -275,6 +309,7 @@ export class Signer {
               amount: BigInt(intent.amount),
               payeeActive: true,
               payeeAgeSeconds: (this.now().getTime() - payee.activated_at.getTime()) / 1000,
+              recipientSanctioned: screening.listed,
             },
             { spentToday: BigInt(spent[0]!.total), approvals: approvals.count, breakerOpen: state.breaker_open },
           );
@@ -285,6 +320,7 @@ export class Signer {
               approvers: approvals.users,
               rejectedApprovals: approvals.rejected,
               errors: decision.errors,
+              ...(screening.listed ? { sanctions: screening.source } : {}),
             });
           }
         }
@@ -340,6 +376,7 @@ export class Signer {
       return this.refuse(new SignerRefusal('invalid_intent', 'payouts are signed, not applied'), intent.intentId, hash);
     }
     const approvals = await countApprovals(req.approvals ?? [], hash, intent.createdBy, this.lookup, this.webauthn);
+    const screening = intent.kind === 'payee_add' ? await this.sanctions.check(intent.address) : { listed: false, source: '' };
 
     const client = await this.pool.connect();
     let refusal: SignerRefusal | null = null;
@@ -359,11 +396,16 @@ export class Signer {
         return { intentId: intent.intentId, intentHash: hash, approvers: prior[0].approvers, replayed: true };
       }
 
-      const decision = canApplyGovernance(intent.intentId, approvals.count);
+      const decision = canApplyGovernance(intent.intentId, approvals.count, screening.listed);
       if (!decision.allowed) {
-        refusal = new SignerRefusal('policy_denied', 'governance changes need two approvers other than the requester', {
-          policies: decision.reasons, approvals: approvals.count, approvers: approvals.users, rejectedApprovals: approvals.rejected,
-        });
+        refusal = new SignerRefusal(
+          'policy_denied',
+          screening.listed ? 'the address is on a sanctions list' : 'governance changes need two approvers other than the requester',
+          {
+            policies: decision.reasons, approvals: approvals.count, approvers: approvals.users, rejectedApprovals: approvals.rejected,
+            ...(screening.listed ? { sanctions: screening.source } : {}),
+          },
+        );
       } else {
         refusal = await this.applyChange(client, intent, stateRows[0].chain_id);
       }

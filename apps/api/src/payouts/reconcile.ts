@@ -54,6 +54,14 @@ export class Reconciler {
     const findings: Finding[] = [];
     const hot = this.settings.hotWallet;
 
+    // A passkey counts as enrolled exactly when the signer says so (bootstrap, approved
+    // approver_add, or removal on the signer host).
+    const enrolled = (await this.signer.approvers()).map((a) => a.credentialId);
+    await this.pool.query(
+      'UPDATE payouts.credentials SET enrolled = (id = ANY($1::text[])) WHERE enrolled IS DISTINCT FROM (id = ANY($1::text[]))',
+      [enrolled],
+    );
+
     // Anchor the audit head first, so this run's own checks cover it.
     const head = await latestAudit(this.pool);
     if (head) {

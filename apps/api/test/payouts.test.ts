@@ -5,7 +5,7 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createPublicClient, createTestClient, http, parseEther, type Hex, type PublicClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { intentChallenge, mockUsdcAbi, SoftAuthenticator } from '@guardrail/core';
+import { intentChallenge, mockUsdcAbi, SAMPLE_SANCTIONED_ADDRESS, SoftAuthenticator } from '@guardrail/core';
 import { Ledger } from '@guardrail/ledger';
 import { Signer, SignerRefusal } from '@guardrail/signer';
 import { chain as anvil, freshDb, RPC_URL } from '../../signer/test/helpers.js';
@@ -15,12 +15,17 @@ import { Reconciler } from '../src/payouts/reconcile.js';
 import { Payouts, type IntentRecord } from '../src/payouts/service.js';
 import { SignerRefused, type SignerPort } from '../src/payouts/signerPort.js';
 import { PayoutWorker } from '../src/payouts/worker.js';
+import { applyRoles, asRole } from '../src/roles.js';
 import { seedAll } from '../src/setup.js';
+import pg from 'pg';
 
 const webauthn = { rpId: 'localhost', rpName: 'Payout Guardrail', origins: ['http://localhost:5173'] };
 const ORIGIN = webauthn.origins[0]!;
 
+const ROLE_PASSWORDS = { api: 'guardrail_api_dev', signer: 'guardrail_signer_dev' };
 let db: Awaited<ReturnType<typeof freshDb>>;
+let apiPool: pg.Pool;
+let signerPool: pg.Pool;
 let app: FastifyInstance;
 let ledger: Ledger;
 let worker: PayoutWorker;
@@ -69,9 +74,15 @@ beforeAll(async () => {
   const seeded = await seedAll(db.pool, ledger, { rpcUrl: RPC_URL, chainId: 31337, hotKey, deployerKey, keysFile, webauthn, payees });
   token = seeded.chain.token;
 
-  signer = new Signer({ pool: db.pool, account: privateKeyToAccount(hotKey), chain: publicClient, webauthn });
+  // From here on everything runs as the least-privilege roles, as in production.
+  await applyRoles(db.pool, ROLE_PASSWORDS);
+  apiPool = new pg.Pool({ connectionString: asRole(db.url, 'guardrail_api', ROLE_PASSWORDS.api), max: 10 });
+  signerPool = new pg.Pool({ connectionString: asRole(db.url, 'guardrail_signer', ROLE_PASSWORDS.signer), max: 5 });
+  ledger = new Ledger(apiPool);
+
+  signer = new Signer({ pool: signerPool, account: privateKeyToAccount(hotKey), chain: publicClient, webauthn });
   const port = inProcess(signer);
-  const payouts = new Payouts(db.pool, seeded.chain, webauthn);
+  const payouts = new Payouts(apiPool, seeded.chain, webauthn);
   const bots = await DemoBots.load(keysFile);
   worker = new PayoutWorker(payouts, ledger, port, publicClient, { confirmations: 1 });
   reconciler = new Reconciler(db.pool, ledger, port, publicClient, seeded.chain);
@@ -80,7 +91,7 @@ beforeAll(async () => {
     verifyCacheMs: 0,
     payouts: {
       payouts, signer: port, reconciler, demoMode: true, bots,
-      attackDeps: { payouts, signer: port, bots, chain: publicClient, reconciler, rpcUrl: RPC_URL, leakedKey: hotKey },
+      attackDeps: { payouts, signer: port, bots, chain: publicClient, reconciler, rpcUrl: RPC_URL, leakedKey: hotKey, adminPool: db.pool },
     },
   });
   await app.ready();
@@ -88,7 +99,31 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  await apiPool?.end();
+  await signerPool?.end();
   await db?.drop();
+});
+
+describe('database roles', () => {
+  const denied = (p: Promise<unknown>) => expect(p).rejects.toThrow(/permission denied|must be owner/);
+
+  it("keeps the API out of the signer's schema and away from history", async () => {
+    await denied(apiPool.query('SELECT * FROM signer.log'));
+    await denied(apiPool.query('SELECT * FROM signer.approvers'));
+    await denied(apiPool.query("UPDATE ledger.entries SET amount = 1"));
+    await denied(apiPool.query('DELETE FROM ledger.transactions'));
+    await denied(apiPool.query("UPDATE payouts.audit SET actor = 'x'"));
+    await denied(apiPool.query('DELETE FROM payouts.approvals'));
+    await denied(apiPool.query('ALTER TABLE payouts.audit DISABLE TRIGGER audit_append_only'));
+    await denied(apiPool.query("INSERT INTO payouts.config (key, value) VALUES ('token', '0x0')"));
+  });
+
+  it('keeps the signer out of everything but its own schema', async () => {
+    await denied(signerPool.query('SELECT * FROM payouts.intents'));
+    await denied(signerPool.query('SELECT * FROM ledger.accounts'));
+    await denied(signerPool.query('DELETE FROM signer.log'));
+    await denied(signerPool.query('ALTER TABLE signer.log DISABLE TRIGGER log_append_only'));
+  });
 });
 
 const sessions = new Map<string, string>();
@@ -226,7 +261,13 @@ describe('payout lifecycle', () => {
 describe('attack lab against the real signer, chain and ledger', () => {
   const run = async (id: string) => (await as('alice', 'POST', `/v1/demo/attacks/${id}/run`)).json() as AttackResult;
 
-  it.each(['swap-recipient', 'inflate-amount', 'replay-approval', 'forged-approver', 'self-approval', 'unknown-payee', 'over-limit', 'double-spend'])(
+  it('refuses to propose a sanctioned payee at the API too', async () => {
+    const res = await as('alice', 'POST', '/v1/payees', { name: 'Consulting LLC', address: SAMPLE_SANCTIONED_ADDRESS });
+    expect(res.statusCode).toBe(422);
+    expect(res.json().error.details.policies).toEqual(['sanctioned-payee']);
+  });
+
+  it.each(['swap-recipient', 'inflate-amount', 'replay-approval', 'forged-approver', 'self-approval', 'unknown-payee', 'sanctioned-payee', 'over-limit', 'double-spend'])(
     '%s is blocked',
     async (id) => {
       const r = await run(id);

@@ -10,8 +10,23 @@ export function apiConfig(env: NodeJS.ProcessEnv = process.env) {
   const chainId = Number(env.CHAIN_ID ?? 31337);
   const demoMode = env.DEMO_MODE !== 'false';
   if (demoMode && chainId !== 31337) throw new Error('DEMO_MODE is only allowed on the local chain (CHAIN_ID=31337)');
+  const ownerUrl = env.DATABASE_URL ?? 'postgres://guardrail:guardrail@localhost:5434/guardrail';
+  const rolePasswords = {
+    api: env.API_DB_PASSWORD ?? 'guardrail_api_dev',
+    signer: env.SIGNER_DB_PASSWORD ?? 'guardrail_signer_dev',
+  };
+  const withUser = (user: string, password: string) => {
+    const u = new URL(ownerUrl);
+    u.username = user;
+    u.password = password;
+    return u.toString();
+  };
   return {
-    databaseUrl: env.DATABASE_URL ?? 'postgres://guardrail:guardrail@localhost:5434/guardrail',
+    /** Owner: migrations, role grants, seeding. Never used for request handling. */
+    databaseUrl: ownerUrl,
+    /** What the API runs as: least privilege, no access to the signer's schema. */
+    apiDatabaseUrl: env.API_DATABASE_URL ?? withUser('guardrail_api', rolePasswords.api),
+    rolePasswords,
     port: Number(env.PORT ?? 8787),
     // Loopback by default. Put a TLS-terminating proxy in front before exposing it.
     host: env.HOST ?? '127.0.0.1',

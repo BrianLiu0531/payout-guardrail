@@ -7,8 +7,10 @@ import {
   canPropose,
   GOVERNANCE_APPROVALS,
   intentHash,
+  listScreen,
   parseIntent,
   requiredApprovals,
+  type SanctionsScreen,
   verifyApproval,
   type Approval,
   type Intent,
@@ -109,12 +111,18 @@ const INTENT_COLUMNS = `id, kind, payload, hash, status, created_by, created_at,
   error, tx_hash, nonce, block_number, fee_wei::text AS fee_wei, ledger_tx_id, attempts`;
 
 export class Payouts {
+  readonly sanctions: SanctionsScreen;
+  private readonly now: () => Date;
+
   constructor(
     readonly pool: pg.Pool,
     readonly chain: ChainSettings,
     readonly webauthn: WebAuthnConfig,
-    private readonly now: () => Date = () => new Date(),
-  ) {}
+    opts: { sanctions?: SanctionsScreen; now?: () => Date } = {},
+  ) {
+    this.sanctions = opts.sanctions ?? listScreen();
+    this.now = opts.now ?? (() => new Date());
+  }
 
   // ---- users and passkeys ---------------------------------------------------------------
 
@@ -163,6 +171,11 @@ export class Payouts {
     if (name.length < 2 || name.length > 100) throw new PayoutError('VALIDATION', 'name must be 2 to 100 characters');
     if (!isAddress(input.address, { strict: false })) throw new PayoutError('VALIDATION', 'not an EVM address');
     const address = getAddress(input.address);
+    const screening = await this.sanctions.check(address);
+    if (screening.listed) {
+      await audit(this.pool, user.id, 'payee.sanctioned_rejected', null, { address, source: screening.source });
+      throw new PayoutError('POLICY_DENIED', 'this address is on a sanctions list', { policies: ['sanctioned-payee'], source: screening.source });
+    }
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'payee';
     const payeeId = `${id}-${randomUUID().slice(0, 6)}`;
     const intent: Intent = {
@@ -211,6 +224,7 @@ export class Payouts {
       amount: units,
       payeeActive: payee.status === 'active',
       payeeAgeSeconds: payee.activated_at ? (this.now().getTime() - payee.activated_at.getTime()) / 1000 : 0,
+      recipientSanctioned: (await this.sanctions.check(payee.address)).listed,
     };
     const decision = canPropose(user, facts, { spentToday: await this.spentToday(), breakerOpen: false });
     if (!decision.allowed) {

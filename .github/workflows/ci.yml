@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -22,6 +22,13 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U guardrail"
           --health-interval 2s --health-timeout 3s --health-retries 30
+      # KMS-compatible endpoint for the KMS signer backend tests.
+      kms:
+        image: nsmithuk/local-kms:3.12.0@sha256:7c987f75e10d775630117293f86d09666169d0416e442244e55f816a002e0e77
+        env:
+          KMS_REGION: us-east-1
+          KMS_ACCOUNT_ID: "111122223333"
+        ports: ["8090:8080"]
     env:
       DATABASE_URL: postgres://guardrail:guardrail@localhost:5432/guardrail
     steps:
