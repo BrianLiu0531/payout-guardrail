@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { createPublicClient, createTestClient, createWalletClient, getAddress, http, parseEther, type Hex, type PublicClient } from 'viem';
+import { createPublicClient, createTestClient, createWalletClient, getAddress, http, parseEther, type Hex, type PublicClient, type WalletClient } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
-import { localChain, mockUsdcAbi, mockUsdcBytecode } from '@guardrail/core';
+import { localChain, mockUsdcAbi, mockUsdcBytecode, payoutVaultAbi, payoutVaultBytecode } from '@guardrail/core';
 
 const ADMIN_URL = process.env.DATABASE_URL ?? 'postgres://guardrail:guardrail@localhost:5434/guardrail';
 export const RPC_URL = process.env.CHAIN_RPC_URL ?? 'http://127.0.0.1:8545';
@@ -37,6 +37,10 @@ export interface TestChain {
   token: Hex;
   mint(to: Hex, amount: bigint): Promise<void>;
   balanceOf(who: Hex): Promise<bigint>;
+  /** Deploys a PayoutVault owned by the deployer, with the hot wallet as its signer. */
+  deployVault(dailyLimit: bigint): Promise<Hex>;
+  /** The deployer, standing in for the vault owner (a multisig in production). */
+  owner: WalletClient;
 }
 
 /**
@@ -63,6 +67,12 @@ export async function freshChain(): Promise<TestChain> {
       await publicClient.waitForTransactionReceipt({ hash: h });
     },
     balanceOf: (who) => publicClient.readContract({ address: token, abi: mockUsdcAbi, functionName: 'balanceOf', args: [who] }),
+    owner: wallet,
+    async deployVault(dailyLimit) {
+      const h = await wallet.deployContract({ abi: payoutVaultAbi, bytecode: payoutVaultBytecode, args: [token, deployer.address, hot.address, dailyLimit] });
+      const r = await publicClient.waitForTransactionReceipt({ hash: h });
+      return getAddress(r.contractAddress as Hex);
+    },
   };
 }
 

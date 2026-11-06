@@ -15,6 +15,8 @@ export interface NetworkSetup {
   token: Hex;
   /** The signer's address (from `npm run signer:admin -- address`). */
   hotWallet: Hex;
+  /** Optional PayoutVault holding the float (deploy it with the signer as its signer and a multisig as owner). */
+  vault?: Hex;
 }
 
 export interface NetworkSetupResult {
@@ -32,10 +34,11 @@ export async function setupNetwork(owner: pg.Pool, ledger: Ledger, s: NetworkSet
   if (actualChainId !== s.chainId) throw new Error(`RPC is chain ${actualChainId}, expected ${s.chainId}`);
   const token = getAddress(s.token);
   const hot = getAddress(s.hotWallet);
+  const custody = s.vault ? getAddress(s.vault) : hot;
   const [symbol, decimals, usdc, eth] = await Promise.all([
     chain.readContract({ address: token, abi: erc20Abi, functionName: 'symbol' }),
     chain.readContract({ address: token, abi: erc20Abi, functionName: 'decimals' }),
-    chain.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [hot] }),
+    chain.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [custody] }),
     chain.getBalance({ address: hot }),
   ]);
   if (decimals !== 6) throw new Error(`token has ${decimals} decimals; the ledger's USDC accounts expect 6`);
@@ -58,10 +61,14 @@ export async function setupNetwork(owner: pg.Pool, ledger: Ledger, s: NetworkSet
     posted ||= !r.replayed;
   };
   // Fixed keys: a second run replays rather than posting again (and refuses if the balance changed).
-  await open(`opening:${s.chainId}:${hot}:usdc`, HOT_USDC, 'equity:owner-capital:usdc', usdc, `${symbol} in the hot wallet`).catch(ignoreReplayConflict);
+  await open(`opening:${s.chainId}:${custody}:usdc`, HOT_USDC, 'equity:owner-capital:usdc', usdc, `${symbol} in ${s.vault ? 'the payout vault' : 'the hot wallet'}`).catch(ignoreReplayConflict);
   await open(`opening:${s.chainId}:${hot}:eth`, HOT_ETH, 'equity:owner-capital:eth', eth, 'ETH in the hot wallet').catch(ignoreReplayConflict);
 
-  for (const [k, v] of [['token', token], ['hot_wallet', hot], ['chain_id', String(s.chainId)]] as const) {
+  const rows: [string, string][] = [['token', token], ['hot_wallet', hot], ['chain_id', String(s.chainId)]];
+  const { rows: existing } = await owner.query("SELECT 1 FROM payouts.config WHERE key = 'deposits_from_block'");
+  if (!existing.length) rows.push(['deposits_from_block', String((await chain.getBlockNumber()) + 1n)]);
+  if (s.vault) rows.push(['vault', custody]);
+  for (const [k, v] of rows) {
     await owner.query('INSERT INTO payouts.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, v]);
   }
   return { token: { symbol, decimals }, opening: { usdc: usdc.toString(), eth: eth.toString(), posted } };

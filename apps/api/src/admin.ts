@@ -22,7 +22,8 @@ try {
       const token = (process.env.TOKEN_ADDRESS ?? (cfg.chainId === BASE_SEPOLIA.chainId ? BASE_SEPOLIA.usdc : undefined)) as Hex | undefined;
       const hotWallet = process.env.HOT_WALLET as Hex | undefined;
       if (!token || !hotWallet) throw new Error('set TOKEN_ADDRESS and HOT_WALLET (from `npm run signer:admin -- address`)');
-      const result = await setupNetwork(owner, new Ledger(owner), { rpcUrl: cfg.rpcUrl, chainId: cfg.chainId, token, hotWallet });
+      const vault = process.env.VAULT_ADDRESS as Hex | undefined;
+      const result = await setupNetwork(owner, new Ledger(owner), { rpcUrl: cfg.rpcUrl, chainId: cfg.chainId, token, hotWallet, vault });
       await applyRoles(owner, cfg.rolePasswords);
       console.log(JSON.stringify(result, null, 2));
       break;

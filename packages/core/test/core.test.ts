@@ -12,6 +12,7 @@ import {
   requiredApprovals,
   SoftAuthenticator,
   verifyApproval,
+  webOrigins,
   type Approval,
   type KnownCredential,
   type PayoutIntent,
@@ -106,6 +107,20 @@ describe('policy (Cedar)', () => {
     expect((await screen.check(SAMPLE_SANCTIONED_ADDRESS.toUpperCase().replace('0X', '0x'))).listed).toBe(true);
     expect((await screen.check(payout.to)).listed).toBe(false);
     expect((await listScreen([payout.to]).check(payout.to)).listed).toBe(true);
+  });
+});
+
+describe('web origins', () => {
+  it('defaults to localhost, follows Codespaces forwarding, and honours explicit settings', () => {
+    expect(webOrigins({})).toEqual({ rpId: 'localhost', origins: ['http://localhost:5173', 'http://localhost:4173'] });
+    expect(webOrigins({ CODESPACE_NAME: 'fuzzy-pancake-7q9', GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: 'app.github.dev' })).toEqual({
+      rpId: 'fuzzy-pancake-7q9-5173.app.github.dev',
+      origins: ['https://fuzzy-pancake-7q9-5173.app.github.dev'],
+    });
+    expect(webOrigins({ WEBAUTHN_RP_ID: 'pay.example.com', WEBAUTHN_ORIGINS: 'https://pay.example.com', CODESPACE_NAME: 'x' })).toEqual({
+      rpId: 'pay.example.com',
+      origins: ['https://pay.example.com'],
+    });
   });
 });
 

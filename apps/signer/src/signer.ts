@@ -6,8 +6,11 @@ import {
   canSign,
   countApprovals,
   encodeTransfer,
+  encodeVaultPay,
   intentHash,
   IntentError,
+  payoutVaultAbi,
+  VAULT_PAY_GAS,
   listScreen,
   type SanctionsScreen,
   parseIntent,
@@ -40,7 +43,9 @@ export type RefusalReason =
   | 'policy_denied'
   | 'intent_id_reused'
   | 'already_applied'
-  | 'not_bootstrapped';
+  | 'not_bootstrapped'
+  | 'vault_paused'
+  | 'vault_limit';
 
 export class SignerRefusal extends Error {
   constructor(
@@ -74,6 +79,7 @@ export interface SignerStatus {
   address: string;
   chainId: number;
   token: string;
+  vault: string | null;
   nextNonce: number;
   breaker: { open: boolean; reason: string | null; at: string | null };
   approvers: number;
@@ -118,6 +124,8 @@ export interface SignerOptions {
 export interface BootstrapInput {
   chainId: number;
   token: Hex;
+  /** PayoutVault holding the float; without one, payouts are plain token transfers from the hot key. */
+  vault?: Hex;
   approvers: { userId: string; credentialId: string; publicKey: Uint8Array }[];
   payees: { payeeId: string; name: string; address: Hex; chainId: number; activatedAt: Date }[];
 }
@@ -157,9 +165,9 @@ export class Signer {
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO signer.state (address, chain_id, token, next_nonce) VALUES ($1, $2, $3, $4)
+        `INSERT INTO signer.state (address, chain_id, token, next_nonce, vault) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (id) DO NOTHING`,
-        [this.address, input.chainId, input.token, nonce],
+        [this.address, input.chainId, input.token, nonce, input.vault ?? null],
       );
       for (const a of input.approvers) {
         await client.query(
@@ -265,8 +273,8 @@ export class Signer {
       // One signing at a time: the nonce, the 24-hour total and the idempotency check all
       // read the state this lock protects.
       const { rows: stateRows } = await client.query<{
-        address: string; chain_id: number; token: string; next_nonce: string; breaker_open: boolean;
-      }>('SELECT address, chain_id, token, next_nonce, breaker_open FROM signer.state FOR UPDATE');
+        address: string; chain_id: number; token: string; next_nonce: string; breaker_open: boolean; vault: Hex | null;
+      }>('SELECT address, chain_id, token, next_nonce, breaker_open, vault FROM signer.state FOR UPDATE');
       const state = stateRows[0];
       if (!state) throw new SignerRefusal('not_bootstrapped', 'signer has not been bootstrapped');
 
@@ -325,6 +333,17 @@ export class Signer {
           }
         }
       }
+      if (!refusal && state.vault) {
+        // The vault would revert anyway; refusing here keeps a doomed transaction (and its gas) off chain.
+        const [paused, remaining] = await Promise.all([
+          this.chain.readContract({ address: state.vault, abi: payoutVaultAbi, functionName: 'paused' }),
+          this.chain.readContract({ address: state.vault, abi: payoutVaultAbi, functionName: 'remaining' }),
+        ]);
+        if (paused) refusal = new SignerRefusal('vault_paused', 'the payout vault is paused on chain');
+        else if (remaining < BigInt(intent.amount)) {
+          refusal = new SignerRefusal('vault_limit', "the payout exceeds what is left of the vault's on-chain daily limit", { remaining: remaining.toString() });
+        }
+      }
       if (refusal) {
         await client.query('ROLLBACK');
         return this.refuse(refusal, intent.intentId, hash);
@@ -339,10 +358,10 @@ export class Signer {
         type: 'eip1559',
         chainId: intent.chainId,
         nonce,
-        to: intent.token,
-        data: encodeTransfer(intent.to, BigInt(intent.amount)),
+        ...(state.vault
+          ? { to: state.vault, data: encodeVaultPay(intent.to, BigInt(intent.amount), hash), gas: VAULT_PAY_GAS }
+          : { to: intent.token, data: encodeTransfer(intent.to, BigInt(intent.amount)), gas: TRANSFER_GAS }),
         value: 0n,
-        gas: TRANSFER_GAS,
         maxFeePerGas: fees.maxFeePerGas,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       });
@@ -462,7 +481,7 @@ export class Signer {
 
   async status(): Promise<SignerStatus> {
     const { rows } = await this.pool.query(
-      `SELECT s.address, s.chain_id, s.token, s.next_nonce, s.breaker_open, s.breaker_reason, s.breaker_at,
+      `SELECT s.address, s.chain_id, s.token, s.vault, s.next_nonce, s.breaker_open, s.breaker_reason, s.breaker_at,
               (SELECT count(*) FROM signer.approvers)::int AS approvers,
               (SELECT count(*) FROM signer.payees)::int AS payees,
               (SELECT count(*) FROM signer.log WHERE kind = 'payout')::int AS signed,
@@ -475,6 +494,7 @@ export class Signer {
       address: r.address,
       chainId: r.chain_id,
       token: r.token,
+      vault: r.vault,
       nextNonce: Number(r.next_nonce),
       breaker: { open: r.breaker_open, reason: r.breaker_reason, at: r.breaker_at?.toISOString() ?? null },
       approvers: r.approvers,

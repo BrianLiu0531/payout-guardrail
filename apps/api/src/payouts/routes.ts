@@ -4,7 +4,8 @@ import { generateAuthenticationOptions } from '@simplewebauthn/server';
 import { intentChallenge, IntentError, POLICY_TEXT } from '@guardrail/core';
 import { listAudit, verifyAudit } from './audit.js';
 import { registerAuth, requireUser } from './auth.js';
-import { ATTACKS, runAttack, type AttackDeps, type AttackId, type DemoBots } from './demo.js';
+import { ATTACKS, runAttack, simulateDeposit, type AttackDeps, type AttackId, type DemoBots } from './demo.js';
+import { verifyIndexerSignature, type Deposits, type IndexerEvent } from './deposits.js';
 import type { Reconciler } from './reconcile.js';
 import { EXPENSE_ACCOUNTS, PayoutError, type Payouts } from './service.js';
 import type { SignerPort } from './signerPort.js';
@@ -17,6 +18,8 @@ export interface PayoutRouteOptions {
   secureCookies?: boolean;
   bots?: DemoBots;
   attackDeps?: AttackDeps;
+  /** Inbound deposits from base-usdc-indexer. */
+  deposits?: { service: Deposits; webhookSecret: string };
 }
 
 const STATUS: Record<PayoutError['code'], number> = {
@@ -46,6 +49,7 @@ export function registerPayoutRoutes(app: FastifyInstance, opts: PayoutRouteOpti
     chainId: payouts.chain.chainId,
     token: payouts.chain.token,
     hotWallet: payouts.chain.hotWallet,
+    custody: payouts.chain.custody,
     tokenDecimals: 6,
     expenseAccounts: EXPENSE_ACCOUNTS,
     demoMode,
@@ -162,6 +166,54 @@ export function registerPayoutRoutes(app: FastifyInstance, opts: PayoutRouteOpti
     async (req) => ({ entries: await listAudit(payouts.pool, req.query.limit ?? 100) }),
   );
 
+  // ---- inbound deposits from base-usdc-indexer --------------------------------------------
+
+  if (opts.deposits) {
+    const { service, webhookSecret } = opts.deposits;
+    app.get('/v1/deposits', async () => ({ deposits: await service.list() }));
+
+    // Authenticated by HMAC over the raw body, not by a session; needs the body exactly as sent.
+    app.register(async (hook) => {
+      hook.addContentTypeParser('application/json', { parseAs: 'string', bodyLimit: 1024 * 1024 }, (req, body, done) => {
+        (req as { rawBody?: string }).rawBody = body as string;
+        try {
+          done(null, JSON.parse(body as string));
+        } catch (err) {
+          done(err as Error, undefined);
+        }
+      });
+      const event = {
+        type: 'object',
+        required: ['eventId', 'type', 'chainId', 'txHash', 'logIndex', 'blockNumber', 'from', 'to', 'value'],
+        properties: {
+          eventId: { type: 'string', minLength: 1, maxLength: 300 },
+          type: { type: 'string', enum: ['transfer.confirmed', 'transfer.reverted'] },
+          chainId: { type: 'integer' },
+          txHash: { type: 'string', pattern: '^0x[0-9a-fA-F]{64}$' },
+          logIndex: { type: 'integer', minimum: 0 },
+          blockNumber: { type: 'integer', minimum: 0 },
+          from: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' },
+          to: { type: 'string', pattern: '^0x[0-9a-fA-F]{40}$' },
+          value: { type: 'string', pattern: '^[0-9]{1,78}$' },
+        },
+      } as const;
+      hook.post<{ Body: { events: IndexerEvent[] } }>(
+        '/v1/integrations/indexer',
+        { schema: { body: { type: 'object', required: ['events'], properties: { events: { type: 'array', maxItems: 500, items: event } } } } },
+        async (req, reply) => {
+          const ok = verifyIndexerSignature(
+            webhookSecret,
+            req.headers['x-indexer-timestamp'] as string | undefined,
+            req.headers['x-indexer-signature'] as string | undefined,
+            (req as { rawBody?: string }).rawBody ?? '',
+          );
+          if (!ok) return reply.status(401).send({ error: { code: 'UNAUTHENTICATED', message: 'bad or stale signature' } });
+          return service.ingest(req.body.events);
+        },
+      );
+    });
+  }
+
   // ---- demo -----------------------------------------------------------------------------
 
   if (demoMode && opts.bots) {
@@ -184,6 +236,14 @@ export function registerPayoutRoutes(app: FastifyInstance, opts: PayoutRouteOpti
   if (demoMode && opts.attackDeps) {
     const deps = opts.attackDeps;
     app.get('/v1/demo/attacks', async () => ({ attacks: ATTACKS }));
+    app.post<{ Body: { amount: string } }>(
+      '/v1/demo/deposit',
+      { schema: { body: obj(['amount'], { amount: { type: 'string', pattern: '^[0-9]{1,6}(\\.[0-9]{1,6})?$' } }) } },
+      async (req) => {
+        requireUser(req);
+        return simulateDeposit(deps, req.body.amount);
+      },
+    );
     app.post<{ Params: { id: string } }>(
       '/v1/demo/attacks/:id/run',
       { schema: { params: { type: 'object', required: ['id'], properties: { id: { type: 'string', enum: ATTACKS.map((a) => a.id) } } } } },

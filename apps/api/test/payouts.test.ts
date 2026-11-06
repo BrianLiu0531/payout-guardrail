@@ -16,7 +16,7 @@ import { Payouts, type IntentRecord } from '../src/payouts/service.js';
 import { SignerRefused, type SignerPort } from '../src/payouts/signerPort.js';
 import { PayoutWorker } from '../src/payouts/worker.js';
 import { applyRoles, asRole } from '../src/roles.js';
-import { seedAll } from '../src/setup.js';
+import { DEMO_VAULT_DAILY_LIMIT, seedAll } from '../src/setup.js';
 import pg from 'pg';
 
 const webauthn = { rpId: 'localhost', rpName: 'Payout Guardrail', origins: ['http://localhost:5173'] };
@@ -33,6 +33,7 @@ let reconciler: Reconciler;
 let signer: Signer;
 let publicClient: PublicClient;
 let token: Hex;
+let custody: Hex;
 const payees = [
   { id: 'acme-hosting', name: 'Acme Hosting', address: privateKeyToAccount(generatePrivateKey()).address },
   { id: 'northwind-contractors', name: 'Northwind Contractors', address: privateKeyToAccount(generatePrivateKey()).address },
@@ -73,6 +74,7 @@ beforeAll(async () => {
   const keysFile = join(tmpdir(), `guardrail-keys-${randomBytes(4).toString('hex')}.json`);
   const seeded = await seedAll(db.pool, ledger, { rpcUrl: RPC_URL, chainId: 31337, hotKey, deployerKey, keysFile, webauthn, payees });
   token = seeded.chain.token;
+  custody = seeded.chain.custody;
 
   // From here on everything runs as the least-privilege roles, as in production.
   await applyRoles(db.pool, ROLE_PASSWORDS);
@@ -283,8 +285,13 @@ describe('attack lab against the real signer, chain and ledger', () => {
   });
 
   it('a stolen key is detected, the breaker opens, and payouts stop until two approvers reset it', async () => {
+    const vaultBefore = await balanceOf(custody);
     const r = await run('leaked-key');
     expect(r.verdict).toBe('detected');
+    // The vault refused the full drain; the thief got at most the daily limit.
+    expect(r.steps.find((s) => s.label.startsWith('Thief tries to drain'))?.outcome).toBe('blocked');
+    expect(vaultBefore - (await balanceOf(custody))).toBeLessThanOrEqual(DEMO_VAULT_DAILY_LIMIT);
+    expect(await balanceOf(custody)).toBeGreaterThan(0n);
     expect((await signer.status()).breaker.open).toBe(true);
 
     const p = (await as('alice', 'POST', '/v1/intents/payout', { payeeId: 'acme-hosting', amount: '20', expenseAccount: 'expense:vendor-services' })).json() as IntentRecord;

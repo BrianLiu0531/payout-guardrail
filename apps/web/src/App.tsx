@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AttackLab } from './attacks/AttackLab.js';
+import { DepositsPage } from './deposits/DepositsPage.js';
 import { LedgerPage } from './ledger/LedgerPage.js';
 import { PayeesPage } from './payouts/PayeesPage.js';
 import { PayoutsPage } from './payouts/PayoutsPage.js';
@@ -9,6 +10,7 @@ import { SessionBar } from './session.js';
 const PAGES = [
   { path: '#/payouts', label: 'Payouts', render: () => <PayoutsPage /> },
   { path: '#/payees', label: 'Payees', render: () => <PayeesPage /> },
+  { path: '#/deposits', label: 'Deposits', render: () => <DepositsPage /> },
   { path: '#/security', label: 'Security', render: () => <SecurityPage /> },
   { path: '#/attacks', label: 'Attack lab', render: () => <AttackLab /> },
   { path: '#/ledger', label: 'Ledger', render: () => <LedgerPage /> },

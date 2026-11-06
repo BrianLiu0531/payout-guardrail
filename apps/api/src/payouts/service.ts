@@ -33,7 +33,10 @@ export const TOKEN_DECIMALS = 6;
 export interface ChainSettings {
   chainId: number;
   token: `0x${string}`;
+  /** The signer's address: sends payout transactions and pays their gas. */
   hotWallet: `0x${string}`;
+  /** Where the payout float is held: the PayoutVault if there is one, otherwise the hot wallet. */
+  custody: `0x${string}`;
 }
 
 export interface WebAuthnConfig {

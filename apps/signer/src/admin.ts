@@ -30,7 +30,8 @@ try {
     case 'bootstrap': {
       const token = process.env.TOKEN_ADDRESS;
       if (!token) throw new Error('set TOKEN_ADDRESS (Base Sepolia USDC: 0x036CbD53842c5426634e7929541eC2318f3dCF7e)');
-      await signer.bootstrap({ chainId: cfg.chainId, token: getAddress(token) as Hex, approvers: [], payees: [] });
+      const vault = process.env.VAULT_ADDRESS ? (getAddress(process.env.VAULT_ADDRESS) as Hex) : undefined;
+      await signer.bootstrap({ chainId: cfg.chainId, token: getAddress(token) as Hex, vault, approvers: [], payees: [] });
       console.log(JSON.stringify(await signer.status(), null, 2));
       break;
     }

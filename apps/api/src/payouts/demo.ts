@@ -1,7 +1,7 @@
 ﻿import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Pool } from 'pg';
-import { createWalletClient, http, parseUnits, type Hex, type PublicClient } from 'viem';
+import { createTestClient, createWalletClient, http, parseUnits, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import {
   intentChallenge,
@@ -9,6 +9,7 @@ import {
   localChain,
   mockUsdcAbi,
   parseIntent,
+  payoutVaultAbi,
   SAMPLE_SANCTIONED_ADDRESS,
   SoftAuthenticator,
   type Approval,
@@ -71,6 +72,28 @@ export interface AttackDeps {
   leakedKey: Hex;
   /** A database-owner connection, used only to play a rogue DB admin. The API itself runs without one. */
   adminPool: Pool;
+  /** Local-chain token deployer (anvil account #0), used to mint test USDC for simulated customers. */
+  deployerKey?: Hex;
+}
+
+/**
+ * Demo only: a new customer address receives test USDC and sends it to the custody address, as a
+ * real deposit would. base-usdc-indexer (if running) picks it up and reports it through the webhook.
+ */
+export async function simulateDeposit(deps: AttackDeps, amount: string): Promise<{ from: Hex; txHash: Hex; amount: string }> {
+  if (!deps.deployerKey) throw new PayoutError('CONFLICT', 'deposits can only be simulated on the local chain');
+  const chainDef = localChain(deps.rpcUrl, deps.payouts.chain.chainId);
+  const value = parseUnits(amount, 6);
+  const customerKey = generatePrivateKey();
+  const customer = privateKeyToAccount(customerKey);
+  await createTestClient({ chain: chainDef, mode: 'anvil', transport: http(deps.rpcUrl) }).setBalance({ address: customer.address, value: 10n ** 16n });
+  const minter = createWalletClient({ account: privateKeyToAccount(deps.deployerKey), chain: chainDef, transport: http(deps.rpcUrl) });
+  const mint = await minter.writeContract({ address: deps.payouts.chain.token, abi: mockUsdcAbi, functionName: 'mint', args: [customer.address, value] });
+  await deps.chain.waitForTransactionReceipt({ hash: mint });
+  const wallet = createWalletClient({ account: customer, chain: chainDef, transport: http(deps.rpcUrl) });
+  const txHash = await wallet.writeContract({ address: deps.payouts.chain.token, abi: mockUsdcAbi, functionName: 'transfer', args: [deps.payouts.chain.custody, value] });
+  await deps.chain.waitForTransactionReceipt({ hash: txHash });
+  return { from: customer.address, txHash, amount: value.toString() };
 }
 
 export const ATTACKS = [
@@ -83,7 +106,7 @@ export const ATTACKS = [
   { id: 'sanctioned-payee', title: 'Whitelist a sanctioned address', blurb: 'A compromised API skips its own screening and gets two approvers to add an OFAC-listed address.' },
   { id: 'over-limit', title: 'Exceed the per-payout limit', blurb: 'Two approvers sign a 60,000 USDC payout; the limit is 50,000.' },
   { id: 'double-spend', title: 'Execute one payout ten times', blurb: 'The same approved payout is sent to the signer ten times at once.' },
-  { id: 'leaked-key', title: 'Steal the hot wallet key', blurb: 'The key leaks and the thief transfers USDC directly, bypassing everything.' },
+  { id: 'leaked-key', title: 'Steal the hot wallet key', blurb: 'The key leaks and the thief tries to drain the payout vault directly, bypassing everything off chain.' },
   { id: 'audit-rewrite', title: 'Rewrite the audit log', blurb: 'A database admin edits history to hide who approved what.' },
 ] as const;
 
@@ -232,13 +255,37 @@ export async function runAttack(id: AttackId, deps: AttackDeps): Promise<AttackR
     case 'leaked-key': {
       const thief = privateKeyToAccount(deps.leakedKey);
       const wallet = createWalletClient({ account: thief, chain: localChain(deps.rpcUrl, payouts.chain.chainId), transport: http(deps.rpcUrl) });
-      const hash = await wallet.writeContract({ address: payouts.chain.token, abi: mockUsdcAbi, functionName: 'transfer', args: [attacker, USDC('500')] });
-      await deps.chain.waitForTransactionReceipt({ hash });
-      steps.push({
-        label: 'Thief transfers 500 USDC with the stolen key',
-        outcome: 'attacker',
-        detail: `Transaction ${short(hash)} succeeded: a stolen key spends without asking anyone. Preventing that takes an HSM/KMS or a smart-account allowance; what this system guarantees is detection and containment.`,
-      });
+      const { custody, hotWallet, token } = payouts.chain;
+      const balanceBefore = await deps.chain.readContract({ address: token, abi: mockUsdcAbi, functionName: 'balanceOf', args: [custody] });
+      let stolen: bigint;
+      if (custody !== hotWallet) {
+        // The float is in the PayoutVault: the key alone can't move it, only call pay() within today's limit.
+        const drain = await wallet
+          .writeContract({ address: custody, abi: payoutVaultAbi, functionName: 'pay', args: [attacker, balanceBefore, `0x${'ee'.repeat(32)}`] })
+          .then(() => 'went through', (e: Error) => (/OverDailyLimit/.test(e.message) ? 'reverted: OverDailyLimit' : `reverted: ${e.message.split('\n')[0]}`));
+        steps.push({
+          label: `Thief tries to drain the whole vault (${(Number(balanceBefore) / 1e6).toLocaleString('en-US')} USDC) with the stolen key`,
+          outcome: drain === 'went through' ? 'attacker' : 'blocked',
+          detail: `The vault contract ${drain === 'went through' ? 'paid it' : `refused it (${drain}): the hot key can only spend within the on-chain daily limit`}.`,
+        });
+        stolen = await deps.chain.readContract({ address: custody, abi: payoutVaultAbi, functionName: 'remaining' });
+        const hash = await wallet.writeContract({ address: custody, abi: payoutVaultAbi, functionName: 'pay', args: [attacker, stolen, `0x${'ef'.repeat(32)}`] });
+        await deps.chain.waitForTransactionReceipt({ hash });
+        steps.push({
+          label: `Thief takes what is left of today's limit: ${(Number(stolen) / 1e6).toLocaleString('en-US')} USDC`,
+          outcome: 'attacker',
+          detail: `Transaction ${short(hash)}. That is the most a stolen key can take today; the other ${(Number(balanceBefore - stolen) / 1e6).toLocaleString('en-US')} USDC stays in the vault, and the vault's owner (a multisig) can pause it and rotate the signer.`,
+        });
+      } else {
+        stolen = USDC('500');
+        const hash = await wallet.writeContract({ address: token, abi: mockUsdcAbi, functionName: 'transfer', args: [attacker, stolen] });
+        await deps.chain.waitForTransactionReceipt({ hash });
+        steps.push({
+          label: 'Thief transfers 500 USDC with the stolen key',
+          outcome: 'attacker',
+          detail: `Transaction ${short(hash)} succeeded: with no vault, a stolen key can spend everything the hot wallet holds.`,
+        });
+      }
       const report = await deps.reconciler.run();
       const found = report.findings.filter((f) => f.severity === 'critical' && !f.acknowledged);
       steps.push({ label: 'Reconciliation runs', outcome: found.length ? 'detected' : 'attacker', detail: found.map((f) => f.message).join(' ') || 'Nothing found.' });
@@ -247,7 +294,10 @@ export async function runAttack(id: AttackId, deps: AttackDeps): Promise<AttackR
       const probe = draft({ amount: USDC('100').toString() });
       await tryToSign('A normal, approved payout is attempted', probe, approvedBy(probe, 'bob'));
       return status.breaker.open
-        ? done('detected', 'The theft is detected on the next reconciliation and the signer stops all payouts until two approvers reset the breaker. The 500 USDC is gone; the rest of the balance is protected.')
+        ? done(
+            'detected',
+            `The loss is capped (${(Number(stolen) / 1e6).toLocaleString('en-US')} USDC, by the vault's daily limit when there is a vault), detected on the next reconciliation, and the signer stops all payouts until two approvers reset the breaker.`,
+          )
         : done('not_blocked', 'The theft went unnoticed.');
     }
     case 'audit-rewrite': {

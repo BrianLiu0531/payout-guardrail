@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import type { Hex } from 'viem';
+import { webOrigins } from '@guardrail/core';
 
 /** Anvil's well-known account #1, the demo hot wallet. Public: local chain only. */
 export const ANVIL_HOT_KEY: Hex = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -39,13 +40,11 @@ export function apiConfig(env: NodeJS.ProcessEnv = process.env) {
     demoKeysFile: env.DEMO_KEYS_FILE ?? fileURLToPath(new URL('../../../.demo-keys.json', import.meta.url)),
     leakedKey: (env.SIGNER_PRIVATE_KEY ?? ANVIL_HOT_KEY) as Hex,
     secureCookies: env.SECURE_COOKIES === 'true',
+    /** Shared with base-usdc-indexer (OUTBOX_WEBHOOK_SECRET); signs the deposit webhook. */
+    indexerWebhookSecret: env.INDEXER_WEBHOOK_SECRET ?? (demoMode ? 'dev-indexer-webhook-secret' : ''),
     workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 1000),
     reconIntervalMs: Number(env.RECON_INTERVAL_MS ?? 15000),
-    webauthn: {
-      rpId: env.WEBAUTHN_RP_ID ?? 'localhost',
-      rpName: 'Payout Guardrail',
-      origins: (env.WEBAUTHN_ORIGINS ?? 'http://localhost:5173,http://localhost:4173').split(','),
-    },
+    webauthn: { ...webOrigins(env), rpName: 'Payout Guardrail' },
   };
 }
 

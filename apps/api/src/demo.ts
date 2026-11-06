@@ -13,10 +13,11 @@ export const DEMO_ACCOUNTS: CreateAccountInput[] = [
   { code: 'equity:owner-capital:usdc', name: 'Owner capital', type: 'equity', currency: 'USDC' },
   { code: 'equity:owner-capital:eth', name: 'Owner capital (gas)', type: 'equity', currency: 'ETH' },
   { code: 'asset:base:safe:usdc', name: 'Treasury Safe (cold)', type: 'asset', currency: 'USDC' },
-  { code: 'asset:base:hot:usdc', name: 'Hot wallet', type: 'asset', currency: 'USDC' },
+  { code: 'asset:base:hot:usdc', name: 'Payout float (vault)', type: 'asset', currency: 'USDC' },
   { code: 'asset:base:hot:eth', name: 'Hot wallet gas', type: 'asset', currency: 'ETH' },
   { code: 'liability:payable:vendors', name: 'Payable to vendors', type: 'liability', currency: 'USDC' },
   { code: 'liability:payable:contractors', name: 'Payable to contractors', type: 'liability', currency: 'USDC' },
+  { code: 'liability:customer-deposits', name: 'Customer deposits', type: 'liability', currency: 'USDC' },
   { code: 'expense:vendor-services', name: 'Vendor services', type: 'expense', currency: 'USDC' },
   { code: 'expense:contractor-payroll', name: 'Contractor payroll', type: 'expense', currency: 'USDC' },
   { code: 'expense:network-fees', name: 'Network fees', type: 'expense', currency: 'ETH' },
@@ -51,7 +52,7 @@ export async function seedDemo(ledger: Ledger): Promise<void> {
     'asset:base:safe:usdc', 'equity:owner-capital:usdc', 250_000n * USDC);
   await post('demo:capital:eth', '2026-10-20T01:05:00Z', 'Gas float funded',
     'asset:base:hot:eth', 'equity:owner-capital:eth', ETH / 2n);
-  await post('demo:topup:1', '2026-10-21T02:00:00Z', 'Hot wallet top-up from Safe (2-of-3)',
+  await post('demo:topup:1', '2026-10-21T02:00:00Z', 'Payout vault top-up from Safe (2-of-3)',
     'asset:base:hot:usdc', 'asset:base:safe:usdc', 20_000n * USDC, { approvals: 2 });
 
   await post('demo:invoice:acme', '2026-10-22T03:15:00Z', 'Invoice INV-1042 — Acme Hosting',
@@ -74,6 +75,6 @@ export async function seedDemo(ledger: Ledger): Promise<void> {
   await post('demo:payout:payroll-october:retry', '2026-11-01T02:20:00Z', 'Contractor batch payout re-settled',
     'liability:payable:contractors', 'asset:base:hot:usdc', 9_000n * USDC, { payoutIntent: 'pi_demo_002', recipients: 3, attempt: 2 });
 
-  await post('demo:topup:2', '2026-11-03T02:00:00Z', 'Hot wallet top-up from Safe (2-of-3)',
+  await post('demo:topup:2', '2026-11-03T02:00:00Z', 'Payout vault top-up from Safe (2-of-3)',
     'asset:base:hot:usdc', 'asset:base:safe:usdc', 10_000n * USDC, { approvals: 2 });
 }

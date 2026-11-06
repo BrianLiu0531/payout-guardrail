@@ -12,7 +12,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
 } from '@simplewebauthn/browser';
-import type { Attack, AttackResult, AuditEntry, Config, Intent, Me, Payee, ReconReport, Security, User, UserSummary } from './payoutTypes.js';
+import type { Attack, AttackResult, AuditEntry, Config, Deposit, Intent, Me, Payee, ReconReport, Security, User, UserSummary } from './payoutTypes.js';
 
 export type {
   AccountDto,
@@ -97,6 +97,8 @@ export const payoutApi = {
   reconcile: () => send<ReconReport>('POST', '/v1/reconcile'),
   audit: () => getJson<{ entries: AuditEntry[] }>('/v1/audit?limit=50'),
   attacks: () => getJson<{ attacks: Attack[] }>('/v1/demo/attacks'),
+  deposits: () => getJson<{ deposits: Deposit[] }>('/v1/deposits'),
+  simulateDeposit: (amount: string) => send<{ from: string; txHash: string; amount: string }>('POST', '/v1/demo/deposit', { amount }),
   runAttack: (id: string) => send<AttackResult>('POST', `/v1/demo/attacks/${id}/run`),
 };
 

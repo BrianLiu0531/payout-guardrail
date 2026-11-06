@@ -166,6 +166,9 @@ h1 {
   color: var(--text-muted);
   max-width: 60ch;
 }
+.lede a {
+  color: var(--primary);
+}
 .section {
   margin-top: 32px;
 }

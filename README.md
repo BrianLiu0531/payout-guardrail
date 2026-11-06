@@ -2,11 +2,16 @@
 
 A self-hostable control plane for **stablecoin payouts**: every outgoing payment is an *intent* that passes a policy, is approved by people signing the intent's hash with passkeys, is executed only if what is signed matches what was approved, and is then reconciled across the intent, the signer's log, the chain and a double-entry ledger.
 
-It is the outbound half of an on-chain money system whose inbound half already exists:
-[base-usdc-indexer](https://github.com/BrianLiu0531/base-usdc-indexer) (deposit detection, reorgs, finality) and
-[usdc-deposit-ledger](https://github.com/BrianLiu0531/usdc-deposit-ledger) (exactly-once crediting).
+It is the outbound half of an on-chain money system, and it is wired to the inbound half:
+
+- **[base-usdc-indexer](https://github.com/BrianLiu0531/base-usdc-indexer)** detects deposits, handles reorgs and finality, and posts each confirmed deposit here over a signed webhook. Each deposit is credited to this ledger exactly once.
+- **[usdc-deposit-ledger](https://github.com/BrianLiu0531/usdc-deposit-ledger)** is the same crediting done on AWS: SQS, Lambda and DynamoDB.
 
 > **Testnet only.** This is a reference implementation and portfolio project. It reduces the damage a compromised component can do; it does not make a treasury "hack-proof".
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/BrianLiu0531/payout-guardrail?quickstart=1)
+
+**Try it in the browser.** The Codespaces button starts everything: Postgres, a local chain, local KMS, the signer, the API, base-usdc-indexer and the web app. The page opens on port 5173 after about a minute. Pick Alice at the top right and run the attack lab. It uses GitHub's free Codespaces hours, and nothing to install.
 
 ![Attack lab: a recipient swap is blocked; a stolen key is detected and the circuit breaker opens](docs/attack-lab.gif)
 
@@ -18,17 +23,19 @@ It is the outbound half of an on-chain money system whose inbound half already e
 | 2 | Payout intents, Cedar policy, passkey (WebAuthn) approvals, separate signer, durable worker, sign-in | **Done** |
 | 3 | Intent-bound signing, four-way reconciliation, circuit breaker, tamper-evident audit log with signer-held checkpoints, attack lab | **Done** |
 | 4 | KMS signer backend, OFAC sanctions screening, least-privilege database roles, Base Sepolia install path | **Done** (Sepolia: verified read-only; payouts need a funded wallet) |
+| 5 | On-chain spending limit (PayoutVault), deposits from base-usdc-indexer, one-click Codespaces demo | **Done** |
 
 ## Running it
 
-Needs Node 22+ and Docker.
+Needs Node 22+, Docker and (for the indexer) Go 1.26+. `npm run demo:start` does all of the following in the background; or run each step yourself:
 
 ```bash
 npm install
 docker compose up -d --wait   # PostgreSQL 16 on :5434, a local EVM chain (anvil) on :8545, local KMS on :8090
-npm run seed                  # ledger history, demo token, users, payees, signer bootstrap, database roles
+npm run seed                  # ledger history, demo token and PayoutVault, users, payees, signer bootstrap, database roles
 npm run dev:signer            # signer on 127.0.0.1:8788 (holds the hot wallet key)
 npm run dev:api               # API on 127.0.0.1:8787, with the payout worker and reconciler
+npm run dev:indexer           # base-usdc-indexer watching the vault, posting deposits to the API (optional)
 npm run dev:web               # http://localhost:5173 (open this)
 ```
 
@@ -90,10 +97,33 @@ The **Attack lab** page plays a compromised API server (or worse) against the re
 | Whitelist an OFAC-listed address with two approvals, skipping the API's screening | Blocked | The signer screens every new payee and every recipient itself |
 | 60,000 USDC with two approvals (limit 50,000) | Blocked | Policy `forbid` beats any `permit` |
 | Send one approved payout to the signer ten times at once | Blocked | One transaction, one nonce |
-| Steal the hot wallet key and transfer directly | **Detected and contained** | Reconciliation finds the unsigned transfer and opens the breaker; the signer then refuses everything until two approvers reset it |
+| Steal the hot wallet key and drain the float | **Capped, detected and contained** | The PayoutVault refuses the full drain on chain; the thief gets at most what is left of today's limit. Reconciliation finds the unsigned transfer and opens the breaker, and the signer refuses everything until two approvers reset it |
 | Edit the audit log: first from inside the API, then as a DB admin who recomputes every later hash | Blocked, then **detected** | The API's database role can't update the log at all; the admin's rewritten chain no longer matches checkpoints held by the signer |
 
-**What this does not do:** a stolen key can still spend whatever the hot wallet holds. The KMS backend (below) means there is no key file to steal: an attacker needs the signer's KMS permissions, which are logged and revocable. A smart-account allowance (for example a Safe with a spending limit) would cap even that. What this system guarantees is that the damage is limited and visible: the hot wallet only holds a float, and a theft halts all payouts within one reconciliation interval.
+**What a stolen key can still do:** pay out what is left of today's vault limit (10,000 USDC in the demo), and nothing more.
+
+- The float sits in a **PayoutVault** contract (`contracts/PayoutVault.sol`), not in the hot wallet.
+- The signer's key can only call `pay(to, amount, intentHash)`. Each call is checked against an on-chain daily limit, and each intent hash can be paid only once.
+- The signer or the owner can pause the vault. Only the owner, a multisig in production, can unpause it, change the limit or the signer, or withdraw.
+- With the KMS backend (below) there is also no key file to steal: an attacker needs the signer's KMS permissions, which are logged and revocable.
+
+The vault is a minimal, unaudited contract with the same idea as Safe's AllowanceModule. In production, use the audited original.
+
+## Deposits: the inbound half
+
+`npm run dev:indexer` runs [base-usdc-indexer](https://github.com/BrianLiu0531/base-usdc-indexer) against the local chain. It uses the sibling checkout if there is one, otherwise it clones a pinned commit. The indexer watches the vault and POSTs each confirmed transfer to `/v1/integrations/indexer`.
+
+- **Authentication.** Each batch is checked with HMAC-SHA256 over "timestamp.body", with a 5-minute window.
+- **Confirmed deposit.** It is credited exactly once: debit the custody asset, credit `liability:customer-deposits`.
+- **Reverted deposit.** A deposit whose block was reorganised away is reversed.
+- **Payouts seen by the indexer.** They are recorded but not booked twice.
+- **Duplicate deliveries.** They change nothing.
+
+Reconciliation knows about deposits. A transfer into the vault that the indexer has not confirmed yet is a warning. After five minutes it is critical, because the feed is broken, and the breaker opens.
+
+On the **Deposits** page, **Simulate a customer deposit** sends real test USDC from a new address. Verified end to end: credited one to two seconds after it was mined, with chain and ledger equal.
+
+![Deposits reported by base-usdc-indexer: two credited deposits and a payout the indexer saw leave the vault](docs/deposits.png)
 
 ## Running on Base Sepolia
 
@@ -126,7 +156,8 @@ packages/core     intent hashing, Cedar policy, passkey verification, token ABI 
 apps/signer       the signer: separate process and schema, the only holder of the hot wallet key
 apps/api          HTTP API: sign-in, intents, approvals, worker, reconciliation, audit log, attack lab
 apps/web          UI: payouts, payees, security, attack lab, ledger
-contracts         MockUSDC (6 decimals) for the local chain
+contracts         PayoutVault (on-chain daily limit, once per intent, pause) and MockUSDC for the local chain
+scripts           demo-start.sh (whole demo in the background), indexer.mjs (runs base-usdc-indexer), sanctions update
 ```
 
 ## Security notes
@@ -242,7 +273,7 @@ Errors are `LedgerError` with a `code`: `VALIDATION`, `UNKNOWN_ACCOUNT`, `ACCOUN
 
 ```bash
 docker compose up -d --wait   # PostgreSQL, anvil, local KMS
-npm test          # 99 tests: ledger, core, signer, KMS, API end-to-end, network install, UI. Each database test file gets a fresh database,
+npm test          # 111 tests: ledger, core, signer, PayoutVault, KMS, API end-to-end, deposits, network install, UI. Each database test file gets a fresh database,
                   # and each chain test file its own random hot wallet and freshly deployed token
 npm run typecheck
 ```

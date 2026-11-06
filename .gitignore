@@ -7,3 +7,4 @@ dist/
 *.key
 *.log
 .demo-keys.json
+.cache/

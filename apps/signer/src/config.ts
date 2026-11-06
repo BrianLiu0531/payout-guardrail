@@ -1,6 +1,6 @@
 import { createPublicClient, http, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { localChain } from '@guardrail/core';
+import { localChain, webOrigins } from '@guardrail/core';
 
 /**
  * Anvil's well-known development account #1. Public knowledge: anyone can spend from it on any
@@ -36,9 +36,6 @@ export function signerConfig(env: NodeJS.ProcessEnv = process.env) {
     account: privateKeyToAccount(key),
     kms,
     chain: createPublicClient({ chain: localChain(rpcUrl, chainId), transport: http(rpcUrl) }) as PublicClient,
-    webauthn: {
-      rpId: env.WEBAUTHN_RP_ID ?? 'localhost',
-      origins: (env.WEBAUTHN_ORIGINS ?? 'http://localhost:5173,http://localhost:4173').split(','),
-    },
+    webauthn: webOrigins(env),
   };
 }

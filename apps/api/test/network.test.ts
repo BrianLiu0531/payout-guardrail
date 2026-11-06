@@ -66,7 +66,7 @@ describe('network install', () => {
     await expect(signer.enrollBootstrapApprover({ userId: 'mallory', credentialId: keys[2]!.credentialId, publicKey: keys[2]!.publicKeyCose() })).rejects.toBeInstanceOf(SignerRefusal);
 
     // The API learns who is enrolled from the signer, during reconciliation.
-    const settings = { chainId: 31337, token: chain.token, hotWallet: chain.hot.address };
+    const settings = { chainId: 31337, token: chain.token, hotWallet: chain.hot.address, custody: chain.hot.address };
     const report = await new Reconciler(db.pool, ledger, port(signer), chain.publicClient, settings).run();
     const { rows } = await db.pool.query('SELECT id, enrolled FROM payouts.credentials ORDER BY user_id');
     expect(rows.every((r) => r.enrolled)).toBe(true);

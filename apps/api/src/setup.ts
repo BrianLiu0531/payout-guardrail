@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import type pg from 'pg';
 import { createPublicClient, createTestClient, createWalletClient, getAddress, http, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { localChain, mockUsdcAbi, mockUsdcBytecode, SoftAuthenticator } from '@guardrail/core';
+import { localChain, mockUsdcAbi, mockUsdcBytecode, payoutVaultAbi, payoutVaultBytecode, SoftAuthenticator } from '@guardrail/core';
 import { migrate, type Ledger } from '@guardrail/ledger';
 import { Signer } from '@guardrail/signer';
 import { seedDemo } from './demo.js';
@@ -23,6 +23,9 @@ export const DEMO_PAYEES = [
 
 const BOOTSTRAP_AT = new Date('2026-10-20T00:00:00Z');
 
+/** On-chain cap on what the hot key can pay out of the vault per day (demo value). */
+export const DEMO_VAULT_DAILY_LIMIT = 10_000n * 1_000_000n;
+
 export async function migrateAll(pool: pg.Pool): Promise<void> {
   await migrate(pool);
   await migratePayouts(pool);
@@ -33,7 +36,8 @@ export async function readChainSettings(pool: pg.Pool): Promise<ChainSettings | 
   const { rows } = await pool.query<{ key: string; value: string }>('SELECT key, value FROM payouts.config');
   const m = new Map(rows.map((r) => [r.key, r.value]));
   if (!m.has('token') || !m.has('hot_wallet') || !m.has('chain_id')) return null;
-  return { token: m.get('token') as Hex, hotWallet: m.get('hot_wallet') as Hex, chainId: Number(m.get('chain_id')) };
+  const hotWallet = m.get('hot_wallet') as Hex;
+  return { token: m.get('token') as Hex, hotWallet, custody: (m.get('vault') ?? hotWallet) as Hex, chainId: Number(m.get('chain_id')) };
 }
 
 export interface SeedOptions {
@@ -68,13 +72,21 @@ export async function seedAll(pool: pg.Pool, ledger: Ledger, opts: SeedOptions):
     const hash = await deployer.deployContract({ abi: mockUsdcAbi, bytecode: mockUsdcBytecode });
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     const token = getAddress(receipt.contractAddress as Hex);
+    // The float sits in a PayoutVault: the hot key can only pay out of it within a daily limit.
+    // The deployer stands in for the vault's owner, which in production is a multisig.
+    const vaultHash = await deployer.deployContract({
+      abi: payoutVaultAbi, bytecode: payoutVaultBytecode, args: [token, deployer.account.address, hot.address, DEMO_VAULT_DAILY_LIMIT],
+    });
+    const vault = getAddress((await publicClient.waitForTransactionReceipt({ hash: vaultHash })).contractAddress as Hex);
     const usdc = (await ledger.getBalance(HOT_USDC)).balance;
-    const mint = await deployer.writeContract({ address: token, abi: mockUsdcAbi, functionName: 'mint', args: [hot.address, usdc] });
+    const mint = await deployer.writeContract({ address: token, abi: mockUsdcAbi, functionName: 'mint', args: [vault, usdc] });
     await publicClient.waitForTransactionReceipt({ hash: mint });
     const eth = (await ledger.getBalance(HOT_ETH)).balance;
     await createTestClient({ chain: chainDef, mode: 'anvil', transport: http(opts.rpcUrl) }).setBalance({ address: hot.address, value: eth });
-    settings = { token, hotWallet: hot.address, chainId: opts.chainId };
-    for (const [k, v] of [['token', token], ['hot_wallet', hot.address], ['chain_id', String(opts.chainId)]]) {
+    settings = { token, hotWallet: hot.address, custody: vault, chainId: opts.chainId };
+    // Transfers into custody from the next block on are deposits the indexer must report.
+    const fromBlock = String((await publicClient.getBlockNumber()) + 1n);
+    for (const [k, v] of [['token', token], ['hot_wallet', hot.address], ['vault', vault], ['chain_id', String(opts.chainId)], ['deposits_from_block', fromBlock]]) {
       await pool.query('INSERT INTO payouts.config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', [k, v]);
     }
   }
@@ -112,6 +124,7 @@ export async function seedAll(pool: pg.Pool, ledger: Ledger, opts: SeedOptions):
   await signer.bootstrap({
     chainId: opts.chainId,
     token: settings.token,
+    vault: settings.custody !== settings.hotWallet ? settings.custody : undefined,
     approvers: [...bots].map(([userId, k]) => ({ userId, credentialId: k.credentialId, publicKey: k.publicKeyCose() })),
     payees: payees.map((p) => ({ payeeId: p.id, name: p.name, address: getAddress(p.address), chainId: opts.chainId, activatedAt: BOOTSTRAP_AT })),
   });

@@ -31,10 +31,14 @@ function contentSecurityPolicy(): Plugin {
   };
 }
 
+// In GitHub Codespaces the page is served through <codespace>-5173.app.github.dev.
+const forwardedDomain = process.env.CODESPACE_NAME ? process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN : undefined;
+
 export default defineConfig({
   plugins: [react(), contentSecurityPolicy()],
   server: {
     port: 5173,
+    ...(forwardedDomain ? { allowedHosts: [`.${forwardedDomain}`] } : {}),
     // The API listens on loopback only; the dev server forwards /v1 to it.
     proxy: { '/v1': 'http://127.0.0.1:8787' },
   },

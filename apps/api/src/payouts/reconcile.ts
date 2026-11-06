@@ -12,10 +12,14 @@ import type { SignerPort } from './signerPort.js';
  * finding nobody has acknowledged opens the circuit breaker in the signer.
  */
 
+/** How long a deposit may wait for the indexer's confirmation before it counts as missing. */
+export const DEPOSIT_GRACE_SECONDS = 300;
+
 export interface Finding {
   kind:
     | 'unauthorized_transfer' | 'transfer_mismatch' | 'signed_without_intent' | 'intent_signer_mismatch'
-    | 'settled_without_transfer' | 'balance_mismatch' | 'audit_tampered' | 'anchor_rejected' | 'balances_skipped';
+    | 'settled_without_transfer' | 'balance_mismatch' | 'audit_tampered' | 'anchor_rejected' | 'balances_skipped'
+    | 'deposit_not_credited' | 'deposits_pending';
   severity: 'critical' | 'warning';
   /** Stable identity of the finding, used to acknowledge it once investigated. */
   fingerprint: string;
@@ -53,6 +57,7 @@ export class Reconciler {
   async run(): Promise<ReconReport> {
     const findings: Finding[] = [];
     const hot = this.settings.hotWallet;
+    const custody = this.settings.custody;
 
     // A passkey counts as enrolled exactly when the signer says so (bootstrap, approved
     // approver_add, or removal on the signer host).
@@ -78,7 +83,7 @@ export class Reconciler {
     const [log, anchors, transfers, intentsRes] = await Promise.all([
       this.signer.log(0),
       this.signer.anchors(),
-      this.chain.getLogs({ address: this.settings.token, event: transferEvent, args: { from: hot }, fromBlock: 0n, toBlock: 'latest' }),
+      this.chain.getLogs({ address: this.settings.token, event: transferEvent, args: { from: custody }, fromBlock: 0n, toBlock: 'latest' }),
       this.pool.query(`SELECT id, kind, hash, status, tx_hash, amount::text AS amount, payload FROM payouts.intents`),
     ]);
     const intents = new Map(intentsRes.rows.map((r) => [r.id as string, r]));
@@ -109,7 +114,7 @@ export class Reconciler {
       if (!e) {
         findings.push({
           kind: 'unauthorized_transfer', severity: 'critical', fingerprint: `unauthorized_transfer:${tx}`,
-          message: 'Tokens left the hot wallet in a transaction the signer never signed. Treat the key as compromised.',
+          message: 'Tokens left custody in a transaction the signer never signed. Treat the key as compromised.',
           data: { txHash: tx, to: t.args.to ?? null, amount: (t.args.value ?? 0n).toString(), block: Number(t.blockNumber) },
         });
       } else if (e.to?.toLowerCase() !== t.args.to?.toLowerCase() || e.amount !== (t.args.value ?? 0n).toString()) {
@@ -136,23 +141,45 @@ export class Reconciler {
     // 4. Balances: chain and ledger agree, unless a payout is between signing and settlement.
     const inFlight = [...intents.values()].filter((i) => i.status === 'signed' || i.status === 'broadcast').length;
     const [usdcChain, ethChain, usdcLedger, ethLedger] = await Promise.all([
-      this.chain.readContract({ address: this.settings.token, abi: mockUsdcAbi, functionName: 'balanceOf', args: [hot] }),
+      this.chain.readContract({ address: this.settings.token, abi: mockUsdcAbi, functionName: 'balanceOf', args: [custody] }),
       this.chain.getBalance({ address: hot }),
       this.ledger.getBalance(HOT_USDC).then((b) => b.balance),
       this.ledger.getBalance(HOT_ETH).then((b) => b.balance),
     ]);
+    // Inbound: transfers into custody since the install must be credited by the indexer feed.
+    // Recent ones may simply not be confirmed yet; older ones mean the feed is broken.
+    const uncredited = await this.uncreditedDeposits(custody);
+    let pendingInbound = 0n;
+    for (const d of uncredited) {
+      pendingInbound += d.value;
+      if (d.ageSeconds > DEPOSIT_GRACE_SECONDS) {
+        findings.push({
+          kind: 'deposit_not_credited', severity: 'critical', fingerprint: `deposit_not_credited:${d.txHash}:${d.logIndex}`,
+          message: `A deposit has been on chain for ${Math.round(d.ageSeconds / 60)} minutes without being credited. Is base-usdc-indexer running and reaching the webhook?`,
+          data: { txHash: d.txHash, logIndex: d.logIndex, value: d.value.toString(), from: d.from },
+        });
+      }
+    }
+    if (uncredited.some((d) => d.ageSeconds <= DEPOSIT_GRACE_SECONDS)) {
+      findings.push({
+        kind: 'deposits_pending', severity: 'warning', fingerprint: 'deposits_pending',
+        message: 'Deposits on chain are waiting for the indexer to confirm them.',
+        data: { count: uncredited.length, value: pendingInbound.toString() },
+      });
+    }
+
     if (inFlight > 0) {
       findings.push({
         kind: 'balances_skipped', severity: 'warning', fingerprint: 'balances_skipped',
         message: `${inFlight} payout(s) in flight; balances will be compared on the next run.`, data: { inFlight },
       });
     } else {
-      for (const [currency, chainBal, ledgerBal] of [['USDC', usdcChain, usdcLedger], ['ETH', ethChain, ethLedger]] as const) {
+      for (const [currency, chainBal, ledgerBal] of [['USDC', usdcChain - pendingInbound, usdcLedger], ['ETH', ethChain, ethLedger]] as const) {
         if (chainBal !== ledgerBal) {
           const diff = chainBal - ledgerBal;
           findings.push({
             kind: 'balance_mismatch', severity: 'critical', fingerprint: `balance_mismatch:${currency}:${diff}`,
-            message: `Hot wallet ${currency} on chain differs from the ledger.`,
+            message: `${currency === 'USDC' ? 'Custody' : 'Hot wallet'} ${currency} on chain differs from the ledger.`,
             data: { currency, chain: chainBal.toString(), ledger: ledgerBal.toString(), difference: diff.toString() },
           });
         }
@@ -201,6 +228,30 @@ export class Reconciler {
       [ok, summary, JSON.stringify(findings)],
     );
     return { id: Number(rows[0]!.id), at: rows[0]!.at.toISOString(), ok, summary, findings, breakerTripped };
+  }
+
+  /** Transfers into custody after the install block that no credited deposit accounts for. */
+  private async uncreditedDeposits(custody: `0x${string}`) {
+    const { rows } = await this.pool.query<{ value: string }>("SELECT value FROM payouts.config WHERE key = 'deposits_from_block'");
+    if (!rows[0]) return [];
+    const [logs, credited] = await Promise.all([
+      this.chain.getLogs({ address: this.settings.token, event: transferEvent, args: { to: custody }, fromBlock: BigInt(rows[0].value), toBlock: 'latest' }),
+      this.pool.query<{ k: string }>(
+        `SELECT lower(tx_hash) || ':' || log_index AS k FROM payouts.deposits d
+          WHERE outcome = 'credited'
+            AND NOT EXISTS (SELECT 1 FROM payouts.deposits r WHERE r.outcome = 'reversed' AND lower(r.tx_hash) = lower(d.tx_hash) AND r.log_index = d.log_index)`,
+      ),
+    ]);
+    const done = new Set(credited.rows.map((r) => r.k));
+    // Age in chain time: the latest block's timestamp, not this machine's clock.
+    const now = Number((await this.chain.getBlock({ blockTag: 'latest' })).timestamp);
+    const out: { txHash: string; logIndex: number; value: bigint; from: string; ageSeconds: number }[] = [];
+    for (const l of logs) {
+      if (done.has(`${l.transactionHash.toLowerCase()}:${l.logIndex}`)) continue;
+      const block = await this.chain.getBlock({ blockNumber: l.blockNumber });
+      out.push({ txHash: l.transactionHash, logIndex: l.logIndex, value: l.args.value ?? 0n, from: l.args.from ?? '', ageSeconds: now - Number(block.timestamp) });
+    }
+    return out;
   }
 
   async latest(): Promise<ReconReport | null> {

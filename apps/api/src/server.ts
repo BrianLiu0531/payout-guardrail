@@ -3,7 +3,8 @@ import { createPublicClient, http, type PublicClient } from 'viem';
 import { localChain } from '@guardrail/core';
 import { Ledger } from '@guardrail/ledger';
 import { buildApp } from './app.js';
-import { apiConfig } from './config.js';
+import { ANVIL_DEPLOYER_KEY, apiConfig } from './config.js';
+import { Deposits } from './payouts/deposits.js';
 import { DemoBots } from './payouts/demo.js';
 import { Reconciler } from './payouts/reconcile.js';
 import { Payouts } from './payouts/service.js';
@@ -45,7 +46,12 @@ const app = buildApp({
     secureCookies: cfg.secureCookies,
     bots,
     // The owner connection is kept only in demo mode, for the attack that plays a rogue DB admin.
-    attackDeps: bots ? { payouts, signer, bots, chain, reconciler, rpcUrl: cfg.rpcUrl, leakedKey: cfg.leakedKey, adminPool: owner } : undefined,
+    attackDeps: bots
+      ? { payouts, signer, bots, chain, reconciler, rpcUrl: cfg.rpcUrl, leakedKey: cfg.leakedKey, adminPool: owner, deployerKey: ANVIL_DEPLOYER_KEY }
+      : undefined,
+    deposits: cfg.indexerWebhookSecret.length >= 16
+      ? { service: new Deposits(pool, ledger, chainSettings), webhookSecret: cfg.indexerWebhookSecret }
+      : undefined,
   },
 });
 

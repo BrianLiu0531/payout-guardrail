@@ -1,0 +1,23 @@
+{
+  "name": "payout-guardrail",
+  // The Codespaces default image: Docker and Go are preinstalled (Go runs base-usdc-indexer).
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 2, "memory": "8gb" },
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": { "label": "Payout Guardrail", "onAutoForward": "openBrowser" },
+    "8787": { "label": "API", "onAutoForward": "silent" },
+    "8788": { "label": "Signer", "onAutoForward": "silent" },
+    "8089": { "label": "Indexer dashboard", "onAutoForward": "silent" },
+    "8545": { "label": "Local chain", "onAutoForward": "silent" }
+  },
+  "postCreateCommand": "npm ci --ignore-scripts",
+  "postStartCommand": "bash scripts/demo-start.sh",
+  "postAttachCommand": "echo 'Starting the demo (about a minute the first time). The app opens on port 5173; logs are in .cache/logs/. Pick Alice at the top right, then try the Attack lab.'",
+  "customizations": {
+    "codespaces": { "openFiles": ["README.md"] }
+  }
+}

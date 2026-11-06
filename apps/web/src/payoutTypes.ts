@@ -133,6 +133,20 @@ export interface AuditEntry {
   hash: string;
 }
 
+export interface Deposit {
+  eventId: string;
+  type: 'transfer.confirmed' | 'transfer.reverted';
+  txHash: string;
+  logIndex: number;
+  blockNumber: number;
+  from: string;
+  to: string;
+  value: string;
+  outcome: 'credited' | 'reversed' | 'outgoing' | 'ignored';
+  ledgerTxId: string | null;
+  receivedAt: string;
+}
+
 export interface Attack {
   id: string;
   title: string;
