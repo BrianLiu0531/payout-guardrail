@@ -25,7 +25,8 @@
     "admin": "npm run admin -w @guardrail/api --",
     "signer:admin": "npm run admin -w @guardrail/signer --",
     "dev:indexer": "node scripts/indexer.mjs",
-    "demo:start": "bash scripts/demo-start.sh"
+    "demo:start": "bash scripts/demo-start.sh",
+    "demo:stop": "bash scripts/demo-stop.sh"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
