@@ -9,13 +9,14 @@ mkdir -p .cache/logs
 docker compose up -d --wait
 npm run seed
 
+source scripts/lib.sh
+
 start() {
   local name=$1; shift
   # Running this script again stops the previous copy first. Each service runs in its own
   # process group (setsid), so stopping it also stops the node/go processes npm started.
   if [ -f ".cache/$name.pid" ]; then
-    local old; old=$(cat ".cache/$name.pid")
-    kill -- "-$old" 2>/dev/null || kill "$old" 2>/dev/null || true
+    stop_service "$name" > /dev/null
     sleep 1
   fi
   if command -v setsid > /dev/null; then
