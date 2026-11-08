@@ -22,6 +22,9 @@ export async function createTestDb(): Promise<TestDb> {
   const url = new URL(ADMIN_URL);
   url.pathname = `/${name}`;
   const pool = new pg.Pool({ connectionString: url.toString(), max: 40 });
+  // pool.end() can resolve before every backend has gone; DROP ... WITH (FORCE) then terminates
+  // the stragglers, and that error would surface as an uncaught exception on the client.
+  pool.on('connect', (client) => client.on('error', () => {}));
   await migrate(pool);
 
   return {
@@ -31,6 +34,11 @@ export async function createTestDb(): Promise<TestDb> {
       await pool.end();
       const admin2 = new pg.Client({ connectionString: ADMIN_URL });
       await admin2.connect();
+      for (let i = 0; i < 50; i++) {
+        const { rows } = await admin2.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1', [name]);
+        if (rows[0].n === 0) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       await admin2.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
       await admin2.end();
     },

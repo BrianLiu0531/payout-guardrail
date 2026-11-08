@@ -18,6 +18,9 @@ export async function freshDb(): Promise<{ pool: pg.Pool; url: string; drop(): P
   const url = new URL(ADMIN_URL);
   url.pathname = `/${name}`;
   const pool = new pg.Pool({ connectionString: url.toString(), max: 20 });
+  // pool.end() can resolve before every backend has gone; the forced DROP then terminates the
+  // stragglers, and that error would surface as an uncaught exception on the client.
+  pool.on('connect', (client) => client.on('error', () => {}));
   return {
     pool,
     url: url.toString(),
@@ -25,6 +28,11 @@ export async function freshDb(): Promise<{ pool: pg.Pool; url: string; drop(): P
       await pool.end();
       const a = new pg.Client({ connectionString: ADMIN_URL });
       await a.connect();
+      for (let i = 0; i < 50; i++) {
+        const { rows } = await a.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1', [name]);
+        if (rows[0].n === 0) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       await a.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
       await a.end();
     },
