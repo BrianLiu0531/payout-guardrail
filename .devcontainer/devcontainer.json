@@ -1,9 +1,10 @@
 {
   "name": "payout-guardrail",
-  // The Codespaces default image: Docker and Go are preinstalled (Go runs base-usdc-indexer).
-  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  // Node 22 image plus Docker (Postgres, anvil, local KMS) and Go (runs base-usdc-indexer).
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
   "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/go:1": { "version": "1.26" }
   },
   "hostRequirements": { "cpus": 2, "memory": "8gb" },
   "forwardPorts": [5173],

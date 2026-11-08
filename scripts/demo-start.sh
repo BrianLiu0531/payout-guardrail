@@ -6,6 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .cache/logs
 
+# In a fresh Codespace the Docker daemon may still be starting.
+for i in $(seq 1 30); do docker info > /dev/null 2>&1 && break; sleep 2; done
 docker compose up -d --wait
 npm run seed
 
