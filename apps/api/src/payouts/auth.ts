@@ -36,6 +36,7 @@ export function registerAuth(app: FastifyInstance, { payouts, demoMode, secureCo
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       const origin = req.headers.origin;
       if (origin && !webauthn.origins.includes(origin)) {
+        req.log.warn({ origin, allowed: webauthn.origins }, 'cross-origin request refused');
         return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'cross-origin request refused' } });
       }
     }

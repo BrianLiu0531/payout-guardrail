@@ -6,6 +6,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .cache/logs
 
+# The web origin (and passkey relying party) in Codespaces comes from these two variables.
+# Lifecycle commands may run without them; Codespaces also keeps them in this file.
+if [ -n "${CODESPACES:-}" ] && [ -z "${CODESPACE_NAME:-}" ] && [ -f /workspaces/.codespaces/shared/.env ]; then
+  eval "$(grep -E '^(CODESPACE_NAME|GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN)=' /workspaces/.codespaces/shared/.env | sed 's/^/export /')" || true
+fi
+if [ -n "${CODESPACE_NAME:-}" ]; then
+  echo "web origin: https://${CODESPACE_NAME}-5173.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-?}"
+elif [ -n "${CODESPACES:-}" ]; then
+  echo "warning: CODESPACE_NAME is not set; run 'npm run demo:start' again from the terminal" >&2
+fi
+
 # In a fresh Codespace the Docker daemon may still be starting.
 for i in $(seq 1 30); do docker info > /dev/null 2>&1 && break; sleep 2; done
 docker compose up -d --wait
