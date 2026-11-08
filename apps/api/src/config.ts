@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import type { Hex } from 'viem';
-import { webOrigins } from '@guardrail/core';
+import { requestOrigins, webOrigins } from '@guardrail/core';
 
 /** Anvil's well-known account #1, the demo hot wallet. Public: local chain only. */
 export const ANVIL_HOT_KEY: Hex = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
@@ -45,6 +45,7 @@ export function apiConfig(env: NodeJS.ProcessEnv = process.env) {
     workerIntervalMs: Number(env.WORKER_INTERVAL_MS ?? 1000),
     reconIntervalMs: Number(env.RECON_INTERVAL_MS ?? 15000),
     webauthn: { ...webOrigins(env), rpName: 'Payout Guardrail' },
+    requestOrigins: requestOrigins(env),
   };
 }
 

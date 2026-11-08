@@ -25,18 +25,20 @@ export interface AuthOptions {
   payouts: Payouts;
   demoMode: boolean;
   secureCookies: boolean;
+  requestOrigins?: string[];
 }
 
-export function registerAuth(app: FastifyInstance, { payouts, demoMode, secureCookies }: AuthOptions): void {
+export function registerAuth(app: FastifyInstance, { payouts, demoMode, secureCookies, requestOrigins }: AuthOptions): void {
   const { pool, webauthn } = payouts;
+  const allowedOrigins = requestOrigins ?? webauthn.origins;
   app.decorateRequest('user', null);
 
   // Cross-site requests are refused outright; SameSite=Strict on the cookie is the second layer.
   app.addHook('onRequest', async (req, reply) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       const origin = req.headers.origin;
-      if (origin && !webauthn.origins.includes(origin)) {
-        req.log.warn({ origin, allowed: webauthn.origins }, 'cross-origin request refused');
+      if (origin && !allowedOrigins.includes(origin)) {
+        req.log.warn({ origin, allowed: allowedOrigins }, 'cross-origin request refused');
         return reply.status(403).send({ error: { code: 'FORBIDDEN', message: 'cross-origin request refused' } });
       }
     }

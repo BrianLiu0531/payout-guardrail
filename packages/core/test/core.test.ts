@@ -13,6 +13,7 @@ import {
   SoftAuthenticator,
   verifyApproval,
   webOrigins,
+  requestOrigins,
   type Approval,
   type KnownCredential,
   type PayoutIntent,
@@ -121,6 +122,13 @@ describe('web origins', () => {
       rpId: 'pay.example.com',
       origins: ['https://pay.example.com'],
     });
+  });
+
+  it('accepts the Origin header the Codespaces forwarder rewrites, only in Codespaces', () => {
+    const codespace = { CODESPACE_NAME: 'fuzzy-pancake-7q9', GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: 'app.github.dev' };
+    expect(requestOrigins(codespace)).toEqual(['https://fuzzy-pancake-7q9-5173.app.github.dev', 'https://localhost:5173']);
+    expect(requestOrigins({})).toEqual(['http://localhost:5173', 'http://localhost:4173']);
+    expect(requestOrigins({ ...codespace, WEBAUTHN_ORIGINS: 'https://pay.example.com' })).toEqual(['https://pay.example.com']);
   });
 });
 

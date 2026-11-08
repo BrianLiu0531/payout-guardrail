@@ -44,6 +44,7 @@ const app = buildApp({
     reconciler,
     demoMode: cfg.demoMode,
     secureCookies: cfg.secureCookies,
+    requestOrigins: cfg.requestOrigins,
     bots,
     // The owner connection is kept only in demo mode, for the attack that plays a rogue DB admin.
     attackDeps: bots

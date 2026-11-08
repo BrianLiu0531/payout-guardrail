@@ -16,6 +16,8 @@ export interface PayoutRouteOptions {
   reconciler: Reconciler;
   demoMode: boolean;
   secureCookies?: boolean;
+  /** Origin headers accepted on writes; defaults to the WebAuthn origins. */
+  requestOrigins?: string[];
   bots?: DemoBots;
   attackDeps?: AttackDeps;
   /** Inbound deposits from base-usdc-indexer. */
@@ -43,7 +45,7 @@ export function mapPayoutError(err: unknown): { status: number; body: unknown } 
 
 export function registerPayoutRoutes(app: FastifyInstance, opts: PayoutRouteOptions): void {
   const { payouts, signer, reconciler, demoMode } = opts;
-  registerAuth(app, { payouts, demoMode, secureCookies: opts.secureCookies ?? false });
+  registerAuth(app, { payouts, demoMode, secureCookies: opts.secureCookies ?? false, requestOrigins: opts.requestOrigins });
 
   app.get('/v1/config', async () => ({
     chainId: payouts.chain.chainId,
